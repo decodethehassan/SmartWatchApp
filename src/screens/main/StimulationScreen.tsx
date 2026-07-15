@@ -136,9 +136,13 @@ export default function StimulationScreen() {
     };
   }, []);
 
-  // Auto-poll device status every 2 seconds when connected
+  // Auto-poll device status every 2 seconds when connected (only for writable protocols)
   useEffect(() => {
     if (!isAnyDeviceConnected) return;
+    if (currentProtocol.type === BLEProtocolType.NRF_LOG_SERVICE) {
+      console.log('[Stimulation] Skipping auto-polling for read-only NRF_LOG_SERVICE');
+      return;
+    }
     
     const pollInterval = setInterval(() => {
       console.log('[Stimulation] Auto-polling device status...');
@@ -146,7 +150,7 @@ export default function StimulationScreen() {
     }, 2000);
     
     return () => clearInterval(pollInterval);
-  }, [isAnyDeviceConnected, sendCommand]);
+  }, [isAnyDeviceConnected, currentProtocol, sendCommand]);
 
   useEffect(() => {
     if (receivedMessages.length === 0) return;

@@ -247,8 +247,16 @@ export default function SensorTabScreen() {
     eda: generateDummySparkline(2.3, 0.5),
   });
 
-  // Track freshness — is data actually streaming?
-  const lastLiveUpdate = useRef<number>(0);
+  // Track freshness — is data actually streaming? (per sensor key)
+  const lastLiveUpdates = useRef<Record<SensorKey, number>>({
+    ppgGreen: 0,
+    ppgIR: 0,
+    ppgRed: 0,
+    accel: 0,
+    gyro: 0,
+    temp: 0,
+    eda: 0,
+  });
 
   /** Push a new value into the sparkline ring buffer for a sensor */
   const pushSample = useCallback((key: SensorKey, value: number) => {
@@ -263,33 +271,52 @@ export default function SensorTabScreen() {
   useEffect(() => {
     if (!isConnected) return;
 
-    const ts = live.ppg.lastUpdated?.getTime() ?? 0;
-    // Only process genuinely new data
-    if (ts <= lastLiveUpdate.current) return;
-    lastLiveUpdate.current = ts;
+    // PPG Green
+    const greenTs = live.ppg.lastUpdated?.getTime() ?? 0;
+    if (greenTs > lastLiveUpdates.current.ppgGreen) {
+      lastLiveUpdates.current.ppgGreen = greenTs;
+      if (live.ppg.green) pushSample('ppgGreen', live.ppg.green);
+    }
 
-    // PPG channels
-    if (live.ppg.green) pushSample('ppgGreen', live.ppg.green);
-    if (live.ppg.ir) pushSample('ppgIR', live.ppg.ir);
-    if (live.ppg.red) pushSample('ppgRed', live.ppg.red);
+    // PPG IR
+    const irTs = live.ppg.lastUpdated?.getTime() ?? 0;
+    if (irTs > lastLiveUpdates.current.ppgIR) {
+      lastLiveUpdates.current.ppgIR = irTs;
+      if (live.ppg.ir) pushSample('ppgIR', live.ppg.ir);
+    }
+
+    // PPG Red
+    const redTs = live.ppg.lastUpdated?.getTime() ?? 0;
+    if (redTs > lastLiveUpdates.current.ppgRed) {
+      lastLiveUpdates.current.ppgRed = redTs;
+      if (live.ppg.red) pushSample('ppgRed', live.ppg.red);
+    }
 
     // Accel (magnitude)
-    if (live.accel.lastUpdated) {
+    const accelTs = live.accel.lastUpdated?.getTime() ?? 0;
+    if (accelTs > lastLiveUpdates.current.accel) {
+      lastLiveUpdates.current.accel = accelTs;
       pushSample('accel', live.accel.magnitude);
     }
 
     // Gyro (magnitude)
-    if (live.gyro.lastUpdated) {
+    const gyroTs = live.gyro.lastUpdated?.getTime() ?? 0;
+    if (gyroTs > lastLiveUpdates.current.gyro) {
+      lastLiveUpdates.current.gyro = gyroTs;
       pushSample('gyro', live.gyro.magnitude);
     }
 
     // Temp
-    if (live.temperature.lastUpdated) {
+    const tempTs = live.temperature.lastUpdated?.getTime() ?? 0;
+    if (tempTs > lastLiveUpdates.current.temp) {
+      lastLiveUpdates.current.temp = tempTs;
       pushSample('temp', live.temperature.tempC);
     }
 
     // EDA
-    if (live.eda.lastUpdated) {
+    const edaTs = live.eda.lastUpdated?.getTime() ?? 0;
+    if (edaTs > lastLiveUpdates.current.eda) {
+      lastLiveUpdates.current.eda = edaTs;
       pushSample('eda', live.eda.conductance_uS);
     }
   }, [isConnected, live, pushSample]);

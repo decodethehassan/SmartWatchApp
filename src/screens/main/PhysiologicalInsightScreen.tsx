@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -11,10 +11,86 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LineChart } from 'react-native-chart-kit';
+import { useSharedSensorPipeline } from '../../hooks/SensorPipelineContext';
+import { useBLE } from '../../functionality/BLEContext';
+import PPGWaveformCard from '../../components/PPGWaveformCard';
+
+// ─── Memoized PhysioChart Component ───────────────────────────────────────────
+const PhysioChart = React.memo(({ data, chartConfig, width, height, bezier }: {
+  data: any;
+  chartConfig: any;
+  width: number;
+  height: number;
+  bezier?: boolean;
+}) => {
+  return (
+    <LineChart
+      data={data}
+      width={width}
+      height={height}
+      chartConfig={chartConfig}
+      bezier={bezier}
+      style={styles.chart}
+      withInnerLines={true}
+      withOuterLines={true}
+      withVerticalLines={false}
+      withDots={false}
+    />
+  );
+});
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const CHART_WIDTH = SCREEN_WIDTH - 64;
+const LIVE_HISTORY_SIZE = 60;
+
+type LiveHistory = {
+  labels: string[];
+  heartRate: number[];
+  hrv: number[];
+  temperature: number[];
+  eda: number[];
+  ppgGreen: number[];
+  ppgIr: number[];
+  ppgRed: number[];
+  accelX: number[];
+  accelY: number[];
+  accelZ: number[];
+  gyroX: number[];
+  gyroY: number[];
+  gyroZ: number[];
+};
+
+const EMPTY_HISTORY: LiveHistory = {
+  labels: [],
+  heartRate: [],
+  hrv: [],
+  temperature: [],
+  eda: [],
+  ppgGreen: [],
+  ppgIr: [],
+  ppgRed: [],
+  accelX: [],
+  accelY: [],
+  accelZ: [],
+  gyroX: [],
+  gyroY: [],
+  gyroZ: [],
+};
+
+const appendLive = (values: number[], value: number) =>
+  [...values, Number.isFinite(value) ? value : 0].slice(-LIVE_HISTORY_SIZE);
+
+const displaySeries = (values: number[], fallback: number[]) => {
+  if (values.length > 1) return values;
+  if (values.length === 1) return [values[0], values[0]];
+  return fallback;
+};
+
+const liveLabels = (count: number) =>
+  Array.from({ length: Math.max(count, 2) }, (_, index) =>
+    index === Math.max(count, 2) - 1 ? 'Now' : '',
+  );
 
 const COLORS = {
   primary: '#1B4965',
@@ -93,12 +169,12 @@ const ACTIVITY_DATA = [
 ];
 
 // ─── Shared Chart Config ──────────────────────────────────────────────────────
-function makeChartConfig(color: string) {
+function makeChartConfig(color: string, decimalPlaces: number = 1) {
   return {
     backgroundGradientFrom: COLORS.surface,
     backgroundGradientTo: COLORS.surface,
-    decimalPlaces: 1,
-    color: (_opacity = 1) => color,
+    decimalPlaces,
+    color: (opacity = 1) => color,
     labelColor: () => COLORS.textSecondary,
     propsForDots: {
       r: '4',
@@ -107,7 +183,7 @@ function makeChartConfig(color: string) {
       fill: COLORS.surface,
     },
     propsForBackgroundLines: {
-      strokeDasharray: '',
+      strokeDasharray: '4 4', // clean, premium dashed grid lines
       stroke: COLORS.border,
       strokeWidth: 1,
     },
@@ -193,9 +269,173 @@ function ActivityBar({ label, duration, fraction, color }: {
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function PhysiologicalInsightScreen() {
   const [timeRange, setTimeRange] = useState<TimeRange>('Day');
-  const isConnected = true; // Dummy — always show connected for trend view
+  const [history, setHistory] = useState<LiveHistory>(EMPTY_HISTORY);
+  const { live } = useSharedSensorPipeline();
+  const { isConnected } = useBLE();
+  const lastCaptured = useRef({
+    ppg: 0,
+    heartRate: 0,
+    hrv: 0,
+    temperature: 0,
+    eda: 0,
+    imu: 0,
+  });
 
   const data = DUMMY_DATA[timeRange];
+
+  // Capture each new device sample once. Histories are bounded, so the charts
+  // remain responsive even when the wristband runs for hours.
+  useEffect(() => {
+    const stamps = {
+      ppg: live.ppg.lastUpdated?.getTime() ?? 0,
+      heartRate: live.heartRate.lastUpdated?.getTime() ?? 0,
+      hrv: live.hrv.lastUpdated?.getTime() ?? 0,
+      temperature: live.temperature.lastUpdated?.getTime() ?? 0,
+      eda: live.eda.lastUpdated?.getTime() ?? 0,
+      imu: Math.max(
+        live.accel.lastUpdated?.getTime() ?? 0,
+        live.gyro.lastUpdated?.getTime() ?? 0,
+      ),
+    };
+
+    const changed = {
+      ppg: stamps.ppg > lastCaptured.current.ppg,
+      heartRate: stamps.heartRate > lastCaptured.current.heartRate && live.heartRate.bpm > 0,
+      hrv: stamps.hrv > lastCaptured.current.hrv && live.hrv.rmssd_ms > 0,
+      temperature: stamps.temperature > lastCaptured.current.temperature,
+      eda: stamps.eda > lastCaptured.current.eda,
+      imu: stamps.imu > lastCaptured.current.imu,
+    };
+
+    if (!Object.values(changed).some(Boolean)) return;
+
+    setHistory(prev => {
+      const next = { ...prev };
+      if (changed.ppg) {
+        next.ppgGreen = appendLive(prev.ppgGreen, live.ppg.green);
+        next.ppgIr = appendLive(prev.ppgIr, live.ppg.ir);
+        next.ppgRed = appendLive(prev.ppgRed, live.ppg.red);
+      }
+      if (changed.heartRate) next.heartRate = appendLive(prev.heartRate, live.heartRate.bpm);
+      if (changed.hrv) next.hrv = appendLive(prev.hrv, live.hrv.rmssd_ms);
+      if (changed.temperature) next.temperature = appendLive(prev.temperature, live.temperature.tempC);
+      if (changed.eda) next.eda = appendLive(prev.eda, live.eda.conductance_uS);
+      if (changed.imu) {
+        next.accelX = appendLive(prev.accelX, live.accel.x);
+        next.accelY = appendLive(prev.accelY, live.accel.y);
+        next.accelZ = appendLive(prev.accelZ, live.accel.z);
+        next.gyroX = appendLive(prev.gyroX, live.gyro.x);
+        next.gyroY = appendLive(prev.gyroY, live.gyro.y);
+        next.gyroZ = appendLive(prev.gyroZ, live.gyro.z);
+      }
+      return next;
+    });
+
+    (Object.keys(stamps) as Array<keyof typeof stamps>).forEach(key => {
+      if (stamps[key] > lastCaptured.current[key]) {
+        lastCaptured.current[key] = stamps[key];
+      }
+    });
+  }, [live]);
+
+  const hasFresh = (date: Date | null) => {
+    if (!date) return false;
+    return Date.now() - date.getTime() < 15000;
+  };
+
+  const ppgFresh = hasFresh(live?.ppg?.lastUpdated ?? null);
+  const hrFresh = hasFresh(live?.heartRate?.lastUpdated ?? null);
+  const tempFresh = hasFresh(live?.temperature?.lastUpdated ?? null);
+  const edaFresh = hasFresh(live?.eda?.lastUpdated ?? null);
+
+  const currentHR = hrFresh && live?.heartRate?.bpm && live.heartRate.bpm > 0
+    ? `${Math.round(live.heartRate.bpm)} bpm`
+    : '-- bpm';
+
+  const isHrLive = Boolean(hrFresh && live?.heartRate?.bpm && live.heartRate.bpm > 0);
+
+  // Memoized Chart Configs to prevent re-creation and CPU spikes
+  const hrChartConfig = useMemo(() => makeChartConfig(COLORS.error, 0), []);
+  const hrvChartConfig = useMemo(() => makeChartConfig('#f97316', 0), []);
+  const tempChartConfig = useMemo(() => makeChartConfig('#f97316', 1), []);
+  const edaChartConfig = useMemo(() => makeChartConfig(COLORS.accent, 1), []);
+  const ppgChartConfig = useMemo(() => makeChartConfig('#10b981', 0), []);
+  const imuChartConfig = useMemo(() => makeChartConfig('#2563eb', 0), []);
+  const gyroChartConfig = useMemo(() => makeChartConfig('#7c3aed', 0), []);
+
+  // Memoized Chart Data objects to avoid re-rendering
+  const hrChartData = useMemo(() => ({
+    labels: timeRange === 'Day'
+      ? liveLabels(displaySeries(history.heartRate, [0, 0]).length)
+      : data.hrLabels,
+    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.heartRate, [0, 0]) : data.hr }],
+  }), [data.hrLabels, data.hr, history.heartRate, timeRange]);
+
+  const hrvChartData = useMemo(() => ({
+    labels: timeRange === 'Day'
+      ? liveLabels(displaySeries(history.hrv, [0, 0]).length)
+      : data.hrvLabels,
+    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.hrv, [0, 0]) : data.hrv }],
+  }), [data.hrvLabels, data.hrv, history.hrv, timeRange]);
+
+  const tempChartData = useMemo(() => ({
+    labels: timeRange === 'Day'
+      ? liveLabels(displaySeries(history.temperature, [0, 0]).length)
+      : data.tempLabels,
+    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.temperature, [0, 0]) : data.temp }],
+  }), [data.tempLabels, data.temp, history.temperature, timeRange]);
+
+  const edaChartData = useMemo(() => ({
+    labels: timeRange === 'Day'
+      ? liveLabels(displaySeries(history.eda, [0, 0]).length)
+      : data.edaLabels,
+    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.eda, [0, 0]) : data.eda }],
+  }), [data.edaLabels, data.eda, history.eda, timeRange]);
+
+  const ppgChartData = useMemo(() => {
+    const green = displaySeries(history.ppgGreen, [0, 0]);
+    const datasets = [{ data: green, color: () => '#10b981' }];
+    const legend = ['Green'];
+    if (history.ppgIr.some(value => value > 0)) {
+      datasets.push({ data: displaySeries(history.ppgIr, [0, 0]), color: () => '#7c3aed' });
+      legend.push('IR');
+    }
+    if (history.ppgRed.some(value => value > 0)) {
+      datasets.push({ data: displaySeries(history.ppgRed, [0, 0]), color: () => '#ef4444' });
+      legend.push('Red');
+    }
+    return {
+      labels: liveLabels(green.length),
+      datasets,
+      legend,
+    };
+  }, [history.ppgGreen, history.ppgIr, history.ppgRed]);
+
+  const accelChartData = useMemo(() => {
+    const x = displaySeries(history.accelX, [0, 0]);
+    return {
+      labels: liveLabels(x.length),
+      datasets: [
+        { data: x, color: () => '#2563eb' },
+        { data: displaySeries(history.accelY, [0, 0]), color: () => '#10b981' },
+        { data: displaySeries(history.accelZ, [0, 0]), color: () => '#f59e0b' },
+      ],
+      legend: ['X', 'Y', 'Z'],
+    };
+  }, [history.accelX, history.accelY, history.accelZ]);
+
+  const gyroChartData = useMemo(() => {
+    const x = displaySeries(history.gyroX, [0, 0]);
+    return {
+      labels: liveLabels(x.length),
+      datasets: [
+        { data: x, color: () => '#2563eb' },
+        { data: displaySeries(history.gyroY, [0, 0]), color: () => '#10b981' },
+        { data: displaySeries(history.gyroZ, [0, 0]), color: () => '#f59e0b' },
+      ],
+      legend: ['X', 'Y', 'Z'],
+    };
+  }, [history.gyroX, history.gyroY, history.gyroZ]);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -234,26 +474,55 @@ export default function PhysiologicalInsightScreen() {
           })}
         </View>
 
+        {/* ── Real-time PPG Waveform Display (New Feature) ── */}
+        <View style={{ paddingHorizontal: 16, marginBottom: 14 }}>
+          <PPGWaveformCard
+            filtSamples={live.ppgStream.filt}
+            thSamples={live.ppgStream.th}
+            peakFlags={live.ppgStream.peaks}
+            hrBpm={live.heartRate.bpm}
+            confidence={live.heartRate.confidence}
+            sqi={live.ppgQuality.sqi}
+            artifact={live.ppgQuality.artifact}
+            qualityOk={live.ppgQuality.qualityOk}
+            wearDetected={live.ppgQuality.wearDetected}
+            ibi_ms={live.heartRate.ibi_ms}
+          />
+        </View>
+
         {/* ── Heart Rate ─────────────────────────────────────────────────── */}
+        <MetricCard
+          accent="#10b981"
+          icon="pulse"
+          title="PPG Channels"
+          subtitle={ppgFresh
+            ? 'Green ' + Math.round(live.ppg.green).toLocaleString()
+              + ' / IR ' + Math.round(live.ppg.ir).toLocaleString()
+              + ' / Red ' + Math.round(live.ppg.red).toLocaleString()
+            : 'Waiting for MAX30101 data'}
+          description="Raw 18-bit MAX30101 channels. Green is present in the normal firmware stream; IR and red appear when those LEDs are enabled."
+        >
+          <PhysioChart
+            data={ppgChartData}
+            width={CHART_WIDTH}
+            height={190}
+            chartConfig={ppgChartConfig}
+          />
+        </MetricCard>
+
         <MetricCard
           accent={COLORS.error}
           icon="heart"
           title="Heart Rate"
-          subtitle="72 bpm avg"
+          subtitle={isHrLive ? currentHR + ' (Live)' : 'Waiting for a quality-approved beat'}
           description="Average resting heart rate over the selected period."
         >
-          <LineChart
-            data={{
-              labels: data.hrLabels,
-              datasets: [{ data: data.hr }],
-            }}
+          <PhysioChart
+            data={hrChartData}
             width={CHART_WIDTH}
             height={180}
-            chartConfig={makeChartConfig(COLORS.error)}
+            chartConfig={hrChartConfig}
             bezier
-            style={styles.chart}
-            withInnerLines={false}
-            withOuterLines={false}
           />
         </MetricCard>
 
@@ -262,42 +531,71 @@ export default function PhysiologicalInsightScreen() {
           accent="#f97316"
           icon="pulse"
           title="Heart Rate Variability"
-          subtitle="45 ms avg"
+          subtitle={live.hrv.rmssd_ms > 0 ? live.hrv.rmssd_ms.toFixed(1) + ' ms (Live)' : 'Waiting for 1-minute HRV summary'}
           description="Higher HRV generally indicates better cardiovascular fitness and stress resilience."
         >
-          <LineChart
-            data={{
-              labels: data.hrvLabels,
-              datasets: [{ data: data.hrv }],
-            }}
+          <PhysioChart
+            data={hrvChartData}
             width={CHART_WIDTH}
             height={180}
-            chartConfig={makeChartConfig('#f97316')}
+            chartConfig={hrvChartConfig}
             bezier
-            style={styles.chart}
-            withInnerLines={false}
-            withOuterLines={false}
           />
         </MetricCard>
 
         {/* ── Activity Insight ────────────────────────────────────────────── */}
         <MetricCard
+          accent="#2563eb"
+          icon="move"
+          title="Accelerometer"
+          subtitle={hasFresh(live.accel.lastUpdated)
+            ? 'X ' + live.accel.x.toFixed(0) + ' / Y ' + live.accel.y.toFixed(0)
+              + ' / Z ' + live.accel.z.toFixed(0) + ' mg'
+            : 'Waiting for LSM6DSO data'}
+          description="Live wrist acceleration in milli-g from the LSM6DSO."
+        >
+          <PhysioChart
+            data={accelChartData}
+            width={CHART_WIDTH}
+            height={190}
+            chartConfig={imuChartConfig}
+          />
+        </MetricCard>
+
+        <MetricCard
+          accent="#7c3aed"
+          icon="sync"
+          title="Gyroscope"
+          subtitle={hasFresh(live.gyro.lastUpdated)
+            ? 'X ' + live.gyro.x.toFixed(0) + ' / Y ' + live.gyro.y.toFixed(0)
+              + ' / Z ' + live.gyro.z.toFixed(0) + ' mdps'
+            : 'Waiting for LSM6DSO data'}
+          description="Live angular velocity in milli-degrees per second from the LSM6DSO."
+        >
+          <PhysioChart
+            data={gyroChartData}
+            width={CHART_WIDTH}
+            height={190}
+            chartConfig={gyroChartConfig}
+          />
+        </MetricCard>
+
+        <MetricCard
           accent={COLORS.accent}
           icon="fitness"
           title="Activity Insight"
-          subtitle="74/100 Activity Score"
+          subtitle={live.activity.state !== 'UNKNOWN'
+            ? live.activity.state + ' / ' + Math.round(live.activity.confidence * 100) + '% confidence'
+            : 'Waiting for firmware activity summary'}
           description="Movement breakdown based on wristband accelerometer and gyroscope data."
         >
           <View style={styles.activityContainer}>
-            {ACTIVITY_DATA.map((item) => (
-              <ActivityBar
-                key={item.label}
-                label={item.label}
-                duration={item.duration}
-                fraction={item.fraction}
-                color={item.color}
-              />
-            ))}
+            <Text style={styles.cardDescription}>
+              Acceleration magnitude: {live.accel.magnitude.toFixed(0)} mg
+            </Text>
+            <Text style={styles.cardDescription}>
+              Angular velocity magnitude: {live.gyro.magnitude.toFixed(0)} mdps
+            </Text>
           </View>
         </MetricCard>
 
@@ -306,21 +604,15 @@ export default function PhysiologicalInsightScreen() {
           accent="#f97316"
           icon="thermometer"
           title="Skin Temperature"
-          subtitle="36.4°C avg"
+          subtitle={tempFresh ? live.temperature.tempC.toFixed(1) + '°C (Live)' : 'Waiting for temperature data'}
           description="Skin temperature trends can reveal circadian rhythm patterns and early signs of illness."
         >
-          <LineChart
-            data={{
-              labels: data.tempLabels,
-              datasets: [{ data: data.temp }],
-            }}
+          <PhysioChart
+            data={tempChartData}
             width={CHART_WIDTH}
             height={180}
-            chartConfig={makeChartConfig('#f97316')}
+            chartConfig={tempChartConfig}
             bezier
-            style={styles.chart}
-            withInnerLines={false}
-            withOuterLines={false}
           />
         </MetricCard>
 
@@ -329,21 +621,15 @@ export default function PhysiologicalInsightScreen() {
           accent={COLORS.accent}
           icon="flash"
           title="Electrodermal Activity"
-          subtitle="2.3 µS avg"
+          subtitle={edaFresh ? live.eda.conductance_uS.toFixed(1) + ' µS (Live)' : 'Waiting for EDA data'}
           description="EDA reflects sympathetic nervous system arousal — useful for stress and emotional monitoring."
         >
-          <LineChart
-            data={{
-              labels: data.edaLabels,
-              datasets: [{ data: data.eda }],
-            }}
+          <PhysioChart
+            data={edaChartData}
             width={CHART_WIDTH}
             height={180}
-            chartConfig={makeChartConfig(COLORS.accent)}
+            chartConfig={edaChartConfig}
             bezier
-            style={styles.chart}
-            withInnerLines={false}
-            withOuterLines={false}
           />
         </MetricCard>
 

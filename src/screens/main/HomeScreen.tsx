@@ -99,36 +99,40 @@ export default function HomeScreen() {
 
   // Patient-friendly metric cards
   const getHealthMetricCards = () => {
-    const ppgFresh = hasFresh(live?.ppg?.lastUpdated ?? null);
+    const heartRateFresh = hasFresh(live?.heartRate?.lastUpdated ?? null);
+    const hrvFresh = hasFresh(live?.hrv?.lastUpdated ?? null);
     const accelFresh = hasFresh(live?.accel?.lastUpdated ?? null);
-
-    // Derive a rough BPM from PPG IR if available (dummy derivation for display)
-    const heartRateValue = ppgFresh && live?.ppg?.ir
-      ? `${Math.min(Math.max(Math.round(safe(live.ppg.ir) % 120 + 50), 50), 130)} bpm`
-      : '72 bpm';
 
     return [
       {
         icon: 'heart' as const,
-        value: ppgFresh ? heartRateValue : (isConnected ? '72 bpm' : '---'),
+        value: heartRateFresh && live.heartRate.bpm > 0
+          ? Math.round(live.heartRate.bpm) + ' bpm'
+          : (isConnected ? 'Waiting' : '---'),
         label: 'Heart Rate',
-        active: ppgFresh,
+        active: heartRateFresh,
       },
       {
         icon: 'pulse' as const,
-        value: ppgFresh ? '45 ms' : (isConnected ? '45 ms' : '---'),
+        value: hrvFresh && live.hrv.rmssd_ms > 0
+          ? live.hrv.rmssd_ms.toFixed(1) + ' ms'
+          : (isConnected ? 'Waiting' : '---'),
         label: 'HRV',
-        active: ppgFresh,
+        active: hrvFresh,
       },
       {
         icon: 'walk' as const,
-        value: accelFresh ? 'Light Active' : (isConnected ? 'Light Active' : '---'),
+        value: live.activity.state !== 'UNKNOWN'
+          ? live.activity.state
+          : (accelFresh ? Math.round(live.accel.magnitude) + ' mg' : (isConnected ? 'Waiting' : '---')),
         label: 'Activity',
         active: accelFresh,
       },
       {
         icon: 'moon' as const,
-        value: isConnected ? '7h 20min' : '---',
+        value: live.activity.lastUpdated
+          ? live.activity.sleepState
+          : (isConnected ? 'Waiting' : '---'),
         label: 'Sleep',
         active: isConnected,
       },

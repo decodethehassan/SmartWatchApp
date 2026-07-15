@@ -88,7 +88,8 @@ export interface TemperatureReading extends BaseSensorReading {
 
 export interface PPGReading extends BaseSensorReading {
   sensorType: SensorType.PPG_RED | SensorType.PPG_IR | SensorType.PPG_GREEN;
-  channel: 'RED' | 'IR' | 'GREEN';
+  /** PPG channel. 'GREEN_FILT' is the firmware algo_v0 high-pass filtered waveform. */
+  channel: 'RED' | 'IR' | 'GREEN' | 'GREEN_FILT';
   rawValue: number;              // Raw ADC value
   filtered?: number;             // Optional filtered value
   signalQuality?: number;        // 0-100 quality score
@@ -99,9 +100,14 @@ export interface HeartRateReading extends BaseSensorReading {
   sensorType: SensorType.HEART_RATE;
   heartRate: number;             // BPM
   rrInterval?: number;           // R-R interval in ms
-  hrv?: number;                  // Heart rate variability
+  hrv?: number;                  // Heart rate variability (RMSSD ms)
   confidence?: number;           // 0-100 confidence score
-  derivedFrom?: 'PPG_IR' | 'PPG_RED' | 'ECG';
+  /**
+   * Source of the HR measurement.
+   * 'PPG_STREAM_FW' = per-beat from algo_v0 PPG_STREAM peak events
+   * 'V0_MIN_FW'     = 1-minute summary from algo_v0 V0_MIN
+   */
+  derivedFrom?: 'PPG_IR' | 'PPG_RED' | 'ECG' | 'PPG_STREAM_FW' | 'V0_MIN_FW';
 }
 
 export interface SpO2Reading extends BaseSensorReading {

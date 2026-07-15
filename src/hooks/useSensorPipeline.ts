@@ -31,6 +31,9 @@ import {
   type ParsedSensorReading,
   type TemperatureParsed,
   type PPGParsed,
+  type PPGStreamParsed,
+  type PPGWindowParsed,
+  type V0MinParsed,
   type IMUCombinedParsed,
   type EDAParsed,
 } from '../functionality/SensorParser';
@@ -38,6 +41,7 @@ import {
   saveTemperatureReading,
   saveEDAReading,
   savePPGReading,
+  saveHeartRateReading,
   saveAccelerometerReading,
   saveGyroscopeReading,
   saveIMUReading,
@@ -193,8 +197,13 @@ export interface SensorState {
   imu: IMUReading | null;
   edaRaw: number | null;
   edaMv: number | null;
+  edaUs: number | null;
   temp_c: number | null;
   lastUpdate: number;
+  tempUpdated: number;
+  ppgUpdated: number;
+  imuUpdated: number;
+  edaUpdated: number;
 }
 
 const initialSensorState: SensorState = {
@@ -204,9 +213,17 @@ const initialSensorState: SensorState = {
   imu: null,
   edaRaw: null,
   edaMv: null,
+  edaUs: null,
   temp_c: null,
   lastUpdate: 0,
+  tempUpdated: 0,
+  ppgUpdated: 0,
+  imuUpdated: 0,
+  edaUpdated: 0,
 };
+
+/** Maximum number of PPG waveform samples kept in the rolling buffer. ~10s at 50Hz stream. */
+export const PPG_WAVEFORM_BUFFER_SIZE = 512;
 
 // Keep old LiveSensorState for compatibility with other parts of code
 export interface LiveSensorState {
@@ -216,11 +233,61 @@ export interface LiveSensorState {
     tempF: number;
     lastUpdated: Date | null;
   };
-  /** MAX30101 PPG */
+  /** MAX30101 PPG raw channel values */
   ppg: {
     red: number;
     ir: number;
     green: number;
+    lastUpdated: Date | null;
+  };
+  /**
+   * Firmware-filtered PPG waveform stream (from PPG_STREAM / PV BLE lines).
+   * The `filt` array holds baseline-removed, high-passed PPG samples at ~50 Hz.
+   * The `peaks` array holds booleans marking accepted beat positions.
+   * Used to render the real-time PPG waveform in MAX30101Monitor.
+   */
+  ppgStream: {
+    filt: number[];        // rolling waveform samples (firmware high-pass filtered)
+    th: number[];          // adaptive threshold line
+    peaks: boolean[];      // peak markers for beat annotations
+    timestamps: number[];  // firmware t_ms values for each sample
+    lastUpdated: Date | null;
+  };
+  /**
+   * Firmware-computed heart rate and IBI.
+   * Updated from PPG_STREAM peak events and V0_MIN 1-minute summaries.
+   */
+  heartRate: {
+    /** Heart rate in BPM. -1 means no valid reading. */
+    bpm: number;
+    /** Most recent inter-beat interval in ms */
+    ibi_ms: number;
+    /** 'high' = qok+good, 'low' = qok but SQI borderline, 'invalid' = no valid reading */
+    confidence: 'high' | 'low' | 'invalid';
+    /** True when the firmware quality gate has passed (qok=1) */
+    qualityOk: boolean;
+    lastUpdated: Date | null;
+  };
+  /** Signal quality from the 5s PV_WIN windows */
+  ppgQuality: {
+    sqi: number;          // 0.0–1.0 signal quality index
+    artifact: boolean;    // motion artifact flag
+    qualityOk: boolean;   // combined quality gate
+    wearDetected: boolean; // IR > wear threshold = skin contact
+    lastUpdated: Date | null;
+  };
+  /** HRV from V0_MIN 1-minute summaries */
+  hrv: {
+    rmssd_ms: number;
+    quality: string;
+    lastUpdated: Date | null;
+  };
+  /** V0_MIN activity / sleep classification (1-minute cadence) */
+  activity: {
+    state: string;     // REST | LOW | WALK | VIG
+    confidence: number;
+    sleepState: string; // SLEEP | WAKE
+    sleepConf: number;
     lastUpdated: Date | null;
   };
   /** LSM6DSO Accelerometer (mg) */
@@ -255,6 +322,11 @@ export interface LiveSensorState {
 const initialLiveState: LiveSensorState = {
   temperature: { tempC: 0, tempF: 0, lastUpdated: null },
   ppg: { red: 0, ir: 0, green: 0, lastUpdated: null },
+  ppgStream: { filt: [], th: [], peaks: [], timestamps: [], lastUpdated: null },
+  heartRate: { bpm: -1, ibi_ms: 0, confidence: 'invalid', qualityOk: false, lastUpdated: null },
+  ppgQuality: { sqi: 0, artifact: false, qualityOk: false, wearDetected: false, lastUpdated: null },
+  hrv: { rmssd_ms: -1, quality: 'INVALID', lastUpdated: null },
+  activity: { state: 'UNKNOWN', confidence: 0, sleepState: 'WAKE', sleepConf: 0, lastUpdated: null },
   accel: { x: 0, y: 0, z: 0, magnitude: 0, lastUpdated: null },
   gyro: { x: 0, y: 0, z: 0, rawX: 0, rawY: 0, rawZ: 0, magnitude: 0, lastUpdated: null },
   eda: { rawADC: 0, mv: 0, conductance_uS: 0, stressLevel: 'LOW', lastUpdated: null },
@@ -378,6 +450,7 @@ export function useSensorPipeline() {
   // Track last-processed message index so we don't re-process old messages
   const lastProcessedIdx = useRef<number>(0);
   const liveRef = useRef<LiveSensorState>(initialLiveState);
+  const lastUiPublishRef = useRef(0);
 
   // ✅ UI STATE THROTTLING: Store latest readings in useRef, update UI at 33ms intervals
   // This prevents React from freezing when high-frequency sensors (100Hz IMU, 100Hz PPG)
@@ -693,9 +766,10 @@ export function useSensorPipeline() {
           case 'temperature': {
             const temp = reading as TemperatureParsed;
             latestReadingsRef.current = {
-              ...s,
-              temp_c: temp.tempC ?? s.temp_c,
+              ...latestReadingsRef.current,
+              temp_c: temp.tempC ?? latestReadingsRef.current.temp_c,
               lastUpdate: now,
+              tempUpdated: now,
             };
             // Save to Firebase (with throttling)
             if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('temperature')) {
@@ -713,32 +787,47 @@ export function useSensorPipeline() {
           }
           case 'ppg': {
             const ppg = reading as PPGParsed;
+            const fallbackSignal = ppg.green || ppg.ir || ppg.red;
             latestReadingsRef.current = {
-              ...s,
-              red: 0,
-              ir: 0,
-              green: ppg.green ?? s.green,
+              ...latestReadingsRef.current,
+              red: ppg.red ?? latestReadingsRef.current.red,
+              ir: ppg.ir ?? latestReadingsRef.current.ir,
+              green: ppg.green ?? latestReadingsRef.current.green,
               lastUpdate: now,
+              ppgUpdated: now,
             };
+            const ppgExt = latestReadingsRef.current as SensorState & {
+              ppgFilt?: number[]; ppgTh?: number[]; ppgPeaks?: boolean[];
+              ppgTs?: number[]; ppgWfUpdated?: number;
+            };
+            // Older firmware may only emit PPG OUT once per second. Keep a
+            // usable raw fallback graph until the filtered stream appears.
+            if (fallbackSignal > 0 && (!ppgExt.ppgWfUpdated || now - ppgExt.ppgWfUpdated > 1000)) {
+              ppgExt.ppgFilt = [...(ppgExt.ppgFilt ?? []), fallbackSignal].slice(-PPG_WAVEFORM_BUFFER_SIZE);
+              ppgExt.ppgTh = [...(ppgExt.ppgTh ?? []), fallbackSignal].slice(-PPG_WAVEFORM_BUFFER_SIZE);
+              ppgExt.ppgPeaks = [...(ppgExt.ppgPeaks ?? []), false].slice(-PPG_WAVEFORM_BUFFER_SIZE);
+              ppgExt.ppgTs = [...(ppgExt.ppgTs ?? []), now].slice(-PPG_WAVEFORM_BUFFER_SIZE);
+              ppgExt.ppgWfUpdated = now;
+            }
             // Save to Firebase (with throttling)
             if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('ppg')) {
-              // Save IR channel (always 0)
+              // Save IR channel
               savePPGReading(userRef.current.uid, {
                 channel: 'IR',
-                rawValue: 0,
-                signalQuality: 0,
-                skinContact: false,
+                rawValue: ppg.ir ?? 0,
+                signalQuality: ppg.ir > 50000 ? 85 : 30,
+                skinContact: ppg.ir > 50000,
                 deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
                 deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
               }).catch(err => console.warn('[Pipeline] Failed to queue PPG IR reading:', err));
 
-              // Save RED channel (always 0)
+              // Save RED channel
               savePPGReading(userRef.current.uid, {
                 channel: 'RED',
-                rawValue: 0,
-                signalQuality: 0,
-                skinContact: false,
+                rawValue: ppg.red ?? 0,
+                signalQuality: ppg.red > 50000 ? 85 : 30,
+                skinContact: ppg.red > 50000,
                 deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
                 deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
@@ -769,7 +858,7 @@ export function useSensorPipeline() {
 
             // Map DIRECTLY to UI state - no stillness filter, no bias learning, no stabilization
             latestReadingsRef.current = {
-              ...s,
+              ...latestReadingsRef.current,
               imu: {
                 ax_mg: imu.ax_mg,
                 ay_mg: imu.ay_mg,
@@ -782,6 +871,7 @@ export function useSensorPipeline() {
                 raw_gz_mdps: imu.gz_mdps,
               },
               lastUpdate: now,
+              imuUpdated: now,
             };
             // Save to Firebase (with throttling)
             if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('imu')) {
@@ -813,10 +903,12 @@ export function useSensorPipeline() {
           case 'eda': {
             const eda = reading as EDAParsed;
             latestReadingsRef.current = {
-              ...s,
-              edaRaw: eda.rawADC ?? s.edaRaw,
-              edaMv: eda.mv ?? s.edaMv,
+              ...latestReadingsRef.current,
+              edaRaw: eda.rawADC ?? latestReadingsRef.current.edaRaw,
+              edaMv: eda.mv ?? latestReadingsRef.current.edaMv,
+              edaUs: eda.uS ?? Math.abs(eda.mv ?? 0) * 0.02,
               lastUpdate: now,
+              edaUpdated: now,
             };
             // Save to Firebase (with throttling)
             if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('eda')) {
@@ -835,6 +927,140 @@ export function useSensorPipeline() {
                 sessionId: sessionRef.current.sessionId,
               }).catch(err => console.warn('[Pipeline] Failed to queue EDA reading:', err));
               markFbWrite('eda');
+              incDataPoints();
+            }
+            break;
+          }
+          case 'ppg_stream': {
+            // Firmware-filtered PPG waveform + instantaneous HR from algo_v0
+            const ps = reading as PPGStreamParsed;
+
+            // Update rolling waveform buffer (refs — no setState inside callback)
+            const wfRef = latestReadingsRef as React.MutableRefObject<SensorState & {
+              ppgFilt?: number[]; ppgTh?: number[]; ppgPeaks?: boolean[];
+              ppgTs?: number[]; ppgWfUpdated?: number;
+              fwHrBpm?: number; fwHrIbi?: number; fwHrQok?: boolean;
+              fwHrUpdated?: number;
+              ppgSqi?: number; ppgArt?: boolean; ppgQok?: boolean;
+              ppgWinUpdated?: number;
+            }>;
+
+            // Rolling buffer: append and trim to PPG_WAVEFORM_BUFFER_SIZE
+            const prevFilt = wfRef.current.ppgFilt ?? [];
+            const prevTh   = wfRef.current.ppgTh   ?? [];
+            const prevPk   = wfRef.current.ppgPeaks ?? [];
+            const prevTs   = wfRef.current.ppgTs    ?? [];
+
+            const newFilt  = [...prevFilt, ps.filt].slice(-512);
+            const newTh    = [...prevTh,   ps.th  ].slice(-512);
+            const newPk    = [...prevPk,   ps.peak].slice(-512);
+            const newTs    = [...prevTs,   ps.t_ms].slice(-512);
+
+            wfRef.current.ppgFilt    = newFilt;
+            wfRef.current.ppgTh      = newTh;
+            wfRef.current.ppgPeaks   = newPk;
+            wfRef.current.ppgTs      = newTs;
+            wfRef.current.ppgWfUpdated = now;
+            // PPG_STREAM is the reliable raw source even when debug logs are disabled.
+            if (ps.green > 0) wfRef.current.green = ps.green;
+            else if (ps.raw > 0) wfRef.current.green = ps.raw;
+            wfRef.current.ppgUpdated = now;
+            if (Number.isFinite(ps.sqi) && ps.sqi >= 0) wfRef.current.ppgSqi = ps.sqi;
+            wfRef.current.ppgArt = ps.artifact;
+            wfRef.current.ppgQok = ps.qok;
+            wfRef.current.ppgWinUpdated = now;
+            wfRef.current.lastUpdate = now;
+
+            // Extract HR on every peak event when quality gate is open
+            if (ps.hr > 0 && ps.qok) {
+              wfRef.current.fwHrBpm     = ps.hr;
+              wfRef.current.fwHrIbi     = ps.ibi_ms;
+              wfRef.current.fwHrQok     = ps.qok;
+              wfRef.current.fwHrUpdated = now;
+
+              // Firebase: save firmware HR (throttled)
+              if (userRef.current && canWriteToFirebase('heartRate')) {
+                saveHeartRateReading(userRef.current.uid, {
+                  heartRate: Math.round(ps.hr),
+                  rrInterval: ps.ibi_ms > 0 ? ps.ibi_ms : undefined,
+                  confidence: ps.qok ? 85 : 50,
+                  derivedFrom: 'PPG_STREAM_FW',
+                  deviceId: connectedDeviceRef.current?.id,
+                  deviceName: connectedDeviceNameRef.current || undefined,
+                  sessionId: sessionRef.current.sessionId ?? undefined,
+                }).catch(err => console.warn('[Pipeline] Failed to queue HR reading:', err));
+                markFbWrite('heartRate');
+                incDataPoints();
+              }
+            }
+
+            // Firebase: save PPG filtered waveform sample (throttled — every 2s)
+            if (userRef.current && canWriteToFirebase('ppg_stream')) {
+              savePPGReading(userRef.current.uid, {
+                channel: 'GREEN_FILT',
+                rawValue: Math.round(ps.filt * 1000), // store as integer
+                signalQuality: Math.round(ps.sqi * 100),
+                skinContact: !ps.artifact && ps.qok,
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId ?? undefined,
+              }).catch(err => console.warn('[Pipeline] Failed to queue PPG_FILT reading:', err));
+              markFbWrite('ppg_stream');
+            }
+            break;
+          }
+          case 'ppg_window': {
+            // 5-second signal quality window from algo_v0
+            const pw = reading as PPGWindowParsed;
+            const wfRef2 = latestReadingsRef as React.MutableRefObject<SensorState & {
+              ppgSqi?: number; ppgArt?: boolean; ppgQok?: boolean;
+              ppgSat?: boolean; ppgWinUpdated?: number;
+            }>;
+            wfRef2.current.ppgSqi        = pw.sqi;
+            wfRef2.current.ppgArt        = pw.artifact;
+            wfRef2.current.ppgQok        = pw.quality_ok;
+            wfRef2.current.ppgSat        = pw.saturation;
+            wfRef2.current.ppgWinUpdated = now;
+            wfRef2.current.lastUpdate = now;
+            break;
+          }
+          case 'v0_min': {
+            // 1-minute summary: definitive HR, HRV, activity, sleep
+            const vm = reading as V0MinParsed;
+            const wfRef3 = latestReadingsRef as React.MutableRefObject<SensorState & {
+              v0Hr?: number; v0HrQual?: string; v0HrCov?: number;
+              v0Rmssd?: number; v0HrvQual?: string;
+              v0Act?: string; v0ActConf?: number;
+              v0Sleep?: string; v0SleepConf?: number;
+              v0MinUpdated?: number;
+            }>;
+            if (vm.hr_bpm > 0) wfRef3.current.v0Hr    = vm.hr_bpm;
+            wfRef3.current.v0HrQual    = vm.hr_quality;
+            wfRef3.current.v0HrCov     = vm.hr_coverage_sec;
+            if (vm.hrv_rmssd_ms > 0) wfRef3.current.v0Rmssd = vm.hrv_rmssd_ms;
+            wfRef3.current.v0HrvQual   = vm.hrv_quality;
+            wfRef3.current.v0Act       = vm.activity;
+            wfRef3.current.v0ActConf   = vm.act_conf;
+            wfRef3.current.v0Sleep     = vm.sleep_state;
+            wfRef3.current.v0SleepConf = vm.sleep_conf;
+            wfRef3.current.v0MinUpdated = now;
+            if (vm.eda_muSCL >= 0) {
+              wfRef3.current.edaUs = vm.eda_muSCL;
+              wfRef3.current.edaUpdated = now;
+            }
+            wfRef3.current.lastUpdate = now;
+
+            // Firebase: save definitive HR from 1-minute summary
+            if (userRef.current && vm.hr_bpm > 0 && vm.hr_quality !== 'INVALID') {
+              saveHeartRateReading(userRef.current.uid, {
+                heartRate: Math.round(vm.hr_bpm),
+                hrv: vm.hrv_rmssd_ms > 0 ? vm.hrv_rmssd_ms : undefined,
+                confidence: vm.hr_quality === 'GOOD' ? 95 : 70,
+                derivedFrom: 'V0_MIN_FW',
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId ?? undefined,
+              }).catch(err => console.warn('[Pipeline] Failed to queue V0_MIN HR:', err));
               incDataPoints();
             }
             break;
@@ -862,22 +1088,75 @@ export function useSensorPipeline() {
       const next = latestReadingsRef.current;
 
       // Atomically push latest readings to React state with explicit timestamp copy
-      if (isMountedRef.current) {
+      if (isMountedRef.current && next.lastUpdate > lastUiPublishRef.current) {
+        lastUiPublishRef.current = next.lastUpdate;
         setLive(prev => {
-          if (prev.temperature.lastUpdated?.getTime?.() === next.lastUpdate) return prev; // No new data
           // Construct LiveSensorState directly from SensorState
           const now = new Date(next.lastUpdate);
+          // Access firmware-specific extensions stored on the same ref object
+          const ext = next as typeof next & {
+            ppgFilt?: number[]; ppgTh?: number[]; ppgPeaks?: boolean[];
+            ppgTs?: number[]; ppgWfUpdated?: number;
+            fwHrBpm?: number; fwHrIbi?: number; fwHrQok?: boolean; fwHrUpdated?: number;
+            ppgSqi?: number; ppgArt?: boolean; ppgQok?: boolean; ppgSat?: boolean;
+            ppgWinUpdated?: number;
+            v0Hr?: number; v0HrQual?: string; v0Rmssd?: number; v0HrvQual?: string;
+            v0Act?: string; v0ActConf?: number; v0Sleep?: string; v0SleepConf?: number;
+            v0MinUpdated?: number;
+          };
+
+          // Determine best HR source: prefer V0_MIN (most accurate), fallback to PPG_STREAM peak
+          const hrBpm     = ext.v0Hr ?? ext.fwHrBpm ?? prev.heartRate.bpm;
+          const hrQok     = ext.fwHrQok ?? false;
+          const hrConf: 'high' | 'low' | 'invalid' =
+            (ext.v0HrQual === 'GOOD') ? 'high' :
+            (ext.v0HrQual === 'LOW' || hrQok) ? 'low' : 'invalid';
+          const hrUpdated = Math.max(ext.fwHrUpdated ?? 0, ext.v0MinUpdated ?? 0);
+
           return {
             temperature: {
               tempC: next.temp_c ?? 0,
               tempF: next.temp_c !== null ? (next.temp_c * 9 / 5) + 32 : 0,
-              lastUpdated: now,
+              lastUpdated: next.tempUpdated ? new Date(next.tempUpdated) : prev.temperature.lastUpdated,
             },
             ppg: {
               red: next.red ?? 0,
               ir: next.ir ?? 0,
               green: next.green ?? 0,
-              lastUpdated: now,
+              lastUpdated: next.ppgUpdated ? new Date(next.ppgUpdated) : prev.ppg.lastUpdated,
+            },
+            ppgStream: {
+              filt: ext.ppgFilt ?? prev.ppgStream.filt,
+              th:   ext.ppgTh   ?? prev.ppgStream.th,
+              peaks: ext.ppgPeaks ?? prev.ppgStream.peaks,
+              timestamps: ext.ppgTs ?? prev.ppgStream.timestamps,
+              lastUpdated: ext.ppgWfUpdated ? new Date(ext.ppgWfUpdated) : prev.ppgStream.lastUpdated,
+            },
+            heartRate: {
+              bpm: hrBpm,
+              ibi_ms: ext.fwHrIbi ?? prev.heartRate.ibi_ms,
+              confidence: hrConf,
+              qualityOk: hrQok,
+              lastUpdated: hrUpdated ? new Date(hrUpdated) : prev.heartRate.lastUpdated,
+            },
+            ppgQuality: {
+              sqi:         ext.ppgSqi ?? prev.ppgQuality.sqi,
+              artifact:    ext.ppgArt ?? prev.ppgQuality.artifact,
+              qualityOk:   ext.ppgQok ?? prev.ppgQuality.qualityOk,
+              wearDetected: (next.ir ?? 0) > 8000 || (next.green ?? 0) > 8000,
+              lastUpdated: ext.ppgWinUpdated ? new Date(ext.ppgWinUpdated) : prev.ppgQuality.lastUpdated,
+            },
+            hrv: {
+              rmssd_ms: ext.v0Rmssd ?? prev.hrv.rmssd_ms,
+              quality:  ext.v0HrvQual ?? prev.hrv.quality,
+              lastUpdated: ext.v0MinUpdated ? new Date(ext.v0MinUpdated) : prev.hrv.lastUpdated,
+            },
+            activity: {
+              state:      ext.v0Act      ?? prev.activity.state,
+              confidence: ext.v0ActConf  ?? prev.activity.confidence,
+              sleepState: ext.v0Sleep    ?? prev.activity.sleepState,
+              sleepConf:  ext.v0SleepConf ?? prev.activity.sleepConf,
+              lastUpdated: ext.v0MinUpdated ? new Date(ext.v0MinUpdated) : prev.activity.lastUpdated,
             },
             accel: {
               x: next.imu?.ax_mg ?? 0,
@@ -888,7 +1167,7 @@ export function useSensorPipeline() {
                 Math.pow(next.imu.ay_mg, 2) +
                 Math.pow(next.imu.az_mg, 2)
               ) : 0,
-              lastUpdated: now,
+              lastUpdated: next.imuUpdated ? new Date(next.imuUpdated) : prev.accel.lastUpdated,
             },
             gyro: {
               x: next.imu?.gx_mdps ?? 0,
@@ -902,19 +1181,19 @@ export function useSensorPipeline() {
                 Math.pow(next.imu.gy_mdps, 2) +
                 Math.pow(next.imu.gz_mdps, 2)
               ) : 0,
-              lastUpdated: now,
+              lastUpdated: next.imuUpdated ? new Date(next.imuUpdated) : prev.gyro.lastUpdated,
             },
             eda: {
               rawADC: next.edaRaw ?? 0,
               mv: next.edaMv ?? 0,
-              conductance_uS: next.edaMv !== null ? edaMvToMicrosiemens(next.edaMv) : 0,
-              stressLevel: next.edaMv !== null ? estimateStressLevel(edaMvToMicrosiemens(next.edaMv)) : 'LOW',
-              lastUpdated: now,
+              conductance_uS: next.edaUs ?? 0,
+              stressLevel: next.edaUs !== null ? estimateStressLevel(next.edaUs) : 'LOW',
+              lastUpdated: next.edaUpdated ? new Date(next.edaUpdated) : prev.eda.lastUpdated,
             },
           };
         });
       }
-    }, 33); // 33ms ≈ 30 FPS
+    }, 100); // 10 FPS is smooth for charts and avoids rebuilding SVG paths 30 times/sec
 
     return () => clearInterval(intervalId);
   }, []); // <-- EMPTY ARRAY (stable interval, doesn't depend on function identities)

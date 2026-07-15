@@ -493,6 +493,7 @@ export const savePPGReading = async (
         sensorType = SensorType.PPG_IR;
         break;
       case 'GREEN':
+      case 'GREEN_FILT':
         sensorType = SensorType.PPG_GREEN;
         break;
       default:

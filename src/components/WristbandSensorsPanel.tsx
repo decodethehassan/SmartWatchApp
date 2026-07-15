@@ -14,6 +14,7 @@ import { useBLE } from '../functionality/BLEContext';
 import { useAuth } from '../auth/AuthContext';
 import { saveSensorReading } from '../firebase/dataLogger';
 import { useSharedSensorPipeline } from '../hooks/SensorPipelineContext';
+import PPGWaveformCard from './PPGWaveformCard';
 
 const WINDOW_SIZE = 100;
 const UPDATE_INTERVAL = 100; // 100ms = 10Hz sampling
@@ -454,6 +455,25 @@ export const WristbandSensorsPanel: React.FC = () => {
             </Text>
           </View>
         )}
+      </View>
+
+      {/* ── FIRMWARE PPG WAVEFORM + HEART RATE (Top-priority section) ── */}
+      <View style={{ paddingHorizontal: 16, marginBottom: 4 }}>
+        <Text style={[styles.groupTitle, { fontSize: 13, color: '#64748b', marginBottom: 8, letterSpacing: 0.5, textTransform: 'uppercase' }]}>
+          ❤️  Heart Rate &amp; PPG — Medical-Wristband-Firmware
+        </Text>
+        <PPGWaveformCard
+          filtSamples={live.ppgStream.filt}
+          thSamples={live.ppgStream.th}
+          peakFlags={live.ppgStream.peaks}
+          hrBpm={live.heartRate.bpm}
+          confidence={live.heartRate.confidence}
+          sqi={live.ppgQuality.sqi}
+          artifact={live.ppgQuality.artifact}
+          qualityOk={live.ppgQuality.qualityOk}
+          wearDetected={live.ppgQuality.wearDetected}
+          ibi_ms={live.heartRate.ibi_ms}
+        />
       </View>
 
       {/* Waveform Displays */}

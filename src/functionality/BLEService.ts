@@ -141,6 +141,8 @@ class BLEService {
    */
   private batchProcessInterval: ReturnType<typeof setTimeout> | null = null;
   private readonly BATCH_INTERVAL_MS = 50;
+  /** Prevent a reconnect backlog from blocking rendering for an entire frame. */
+  private readonly MAX_LINES_PER_BATCH = 200;
 
   /**
    * Maximum safe RX buffer size (bytes) = 32,000.
@@ -631,10 +633,12 @@ class BLEService {
       if (!this.rxLineBuffer) return;
 
       let newlineIdx;
-      let extractedCount = 0;
-
+      let processedLines = 0;
       // FAST EXTRACTION: Zero Regex, minimal memory allocation
-      while ((newlineIdx = this.rxLineBuffer.indexOf('\n')) !== -1) {
+      while (
+        processedLines < this.MAX_LINES_PER_BATCH &&
+        (newlineIdx = this.rxLineBuffer.indexOf('\n')) !== -1
+      ) {
         let line = this.rxLineBuffer.substring(0, newlineIdx);
         this.rxLineBuffer = this.rxLineBuffer.substring(newlineIdx + 1);
 
@@ -644,13 +648,9 @@ class BLEService {
         }
 
         if (line.length > 0) {
-          // ✅ LOG: Raw sensor line from device
-          console.log('[BLE→Parser] RAW LINE:', line);
-
           // Bulletproof emission using singleton DeviceEventEmitter
           DeviceEventEmitter.emit(BLE_DATA_EVENT, line);
-
-          extractedCount++;
+          processedLines++;
         }
       }
 
@@ -703,6 +703,11 @@ class BLEService {
       return false;
     }
 
+    if (this.currentProtocol.type === BLEProtocolType.NRF_LOG_SERVICE) {
+      console.warn('[BLE] nRF Sensor Log Service is receive-only. Skipping write operation:', JSON.stringify(data));
+      return false;
+    }
+
     try {
       const protocol = this.currentProtocol;
       console.log('[BLE] TX:', data.substring(0, 50) + (data.length > 50 ? '...' : ''), `(${data.length} bytes)`);
@@ -711,19 +716,31 @@ class BLEService {
       const encodedData = base64.encode(data);
 
       // Write to RX characteristic (app sends data to device)
-      // Use write-with-response by default (like Python GUI default)
-      if (withResponse) {
-        await this.connectedDevice.writeCharacteristicWithResponseForService(
-          protocol.serviceUUID,
-          protocol.rxCharUUID,
-          encodedData
-        );
-      } else {
-        await this.connectedDevice.writeCharacteristicWithoutResponseForService(
-          protocol.serviceUUID,
-          protocol.rxCharUUID,
-          encodedData
-        );
+      try {
+        if (withResponse) {
+          await this.connectedDevice.writeCharacteristicWithResponseForService(
+            protocol.serviceUUID,
+            protocol.rxCharUUID,
+            encodedData
+          );
+        } else {
+          await this.connectedDevice.writeCharacteristicWithoutResponseForService(
+            protocol.serviceUUID,
+            protocol.rxCharUUID,
+            encodedData
+          );
+        }
+      } catch (writeError: any) {
+        if (withResponse) {
+          console.warn('[BLE] writeWithResponse failed, retrying writeWithoutResponse...', writeError?.message);
+          await this.connectedDevice.writeCharacteristicWithoutResponseForService(
+            protocol.serviceUUID,
+            protocol.rxCharUUID,
+            encodedData
+          );
+        } else {
+          throw writeError;
+        }
       }
 
       console.log('[BLE] ✓ Data sent successfully');

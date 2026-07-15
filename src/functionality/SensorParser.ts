@@ -7,6 +7,9 @@ export type SensorModule = 'PPG' | 'IMU' | 'EDA' | 'TEMP';
 export type SensorReadingType =
   | 'temperature'
   | 'ppg'
+  | 'ppg_stream'
+  | 'ppg_window'
+  | 'v0_min'
   | 'imu_gyro'
   | 'imu_accel'
   | 'imu_combined'
@@ -74,9 +77,108 @@ export interface EDAParsed {
   flatCount: number;
 }
 
+/**
+ * PPG_STREAM / PV line from algo_v0 (firmware-filtered waveform + instantaneous HR).
+ *
+ * Format (normal FW, PPG_FULLFW_PPG_STREAM_ENABLE=1):
+ *   PPG_STREAM,t=<ms>,seq=<n>,raw=<uint>,green=<uint>,filt=<f>,th=<f>,peak=<0|1>,
+ *              ibi=<ms>,hr=<f>,fs=<f>,qok=<0|1>,sqi=<f>,art=<0|1>,settle=<0|1>
+ *
+ * Format (validation FW, PPG_VALIDATION_MODE=1):
+ *   PV,t=<ms>,seq=<n>,raw=<uint>,green=<uint>,filt=<f>,th=<f>,peak=<0|1>,
+ *      ibi=<ms>,hr=<f>,fs=<f>,qok=<0|1>,sqi=<f>,art=<0|1>,settle=<0|1>
+ */
+export interface PPGStreamParsed {
+  type: 'ppg_stream';
+  /** Firmware uptime in ms (from t= field) */
+  t_ms: number;
+  /** Sequential frame number */
+  seq: number;
+  /** Raw PPG ADC value (selected active channel) */
+  raw: number;
+  /** Raw green channel ADC value */
+  green: number;
+  /** Firmware-filtered PPG waveform value (baseline-removed, high-passed) */
+  filt: number;
+  /** Adaptive peak detection threshold */
+  th: number;
+  /** True if this sample is an accepted beat peak */
+  peak: boolean;
+  /** Inter-beat interval in ms (valid only when peak=true and qok=true) */
+  ibi_ms: number;
+  /** Firmware-computed instantaneous heart rate in BPM (-1 if invalid/settling) */
+  hr: number;
+  /** Estimated sampling frequency in Hz */
+  fs: number;
+  /** True if signal quality passed SQI + artifact checks */
+  qok: boolean;
+  /** Signal quality index 0.0–1.0 */
+  sqi: number;
+  /** True if motion artifact detected */
+  artifact: boolean;
+  /** True if sensor still settling after placement */
+  settling: boolean;
+}
+
+/**
+ * PV_WIN line from algo_v0 — 5-second quality window summary.
+ *
+ * Format:
+ *   PV_WIN,t=<ms>,ppg_n=<n>,sqi=<f>,clip=<f>,sat=<0|1>,art=<0|1>,
+ *          qok=<0|1>,settle=<0|1>,sma=<f>,acc_var=<f>
+ */
+export interface PPGWindowParsed {
+  type: 'ppg_window';
+  t_ms: number;
+  ppg_n: number;
+  sqi: number;
+  clip_frac: number;
+  saturation: boolean;
+  artifact: boolean;
+  quality_ok: boolean;
+  settling: boolean;
+  sma: number;
+  acc_var: number;
+}
+
+/**
+ * V0_MIN line from algo_v0 — 1-minute summary (HR, HRV, EDA, Temp, Activity, Sleep).
+ *
+ * Format:
+ *   V0_MIN t=<ms> ACT=<str> act_conf=<f> ART_frac=<f> HR=<f> HR_cov=<n>s HR_q=<str>
+ *          HRV_RMSSD=<f> HRV_q=<str> EDA_muSCL=<f> EDA_sigmaSCR=<f> EDA_q=<str> EDA_conf=<str>
+ *          TEMP=<f> TEMP_q=<str> TEMP_slope5m=<f> SLEEP=<str> sleep_conf=<f>
+ */
+export interface V0MinParsed {
+  type: 'v0_min';
+  t_ms: number;
+  /** Activity: REST | LOW | WALK | VIG */
+  activity: string;
+  act_conf: number;
+  art_frac: number;
+  /** Heart rate in BPM, -1 if invalid */
+  hr_bpm: number;
+  hr_coverage_sec: number;
+  /** HR quality: GOOD | LOW | INVALID */
+  hr_quality: string;
+  /** HRV RMSSD in ms, -1 if invalid */
+  hrv_rmssd_ms: number;
+  hrv_quality: string;
+  eda_muSCL: number;
+  eda_sigmaSCR: number;
+  temp_c: number;
+  temp_quality: string;
+  /** Sleep state: SLEEP | WAKE */
+  sleep_state: string;
+  sleep_conf: number;
+}
+
 export type ParsedSensorReading =
   | TemperatureParsed
   | PPGParsed
+  | PPGStreamParsed
+  | PPGWindowParsed
+  | V0MinParsed
   | IMUGyroParsed
   | IMUAccelParsed
   | IMUCombinedParsed
@@ -171,16 +273,25 @@ function parseTemperature(message: string): TemperatureParsed | null {
  */
 function parsePPG(message: string): PPGParsed | null {
   try {
-    // LENIENT: Match RED/IR anywhere with flexible spacing/separators
+    // Accept full three-channel, green-only, and selected-signal firmware logs.
     const redMatch = message.match(/RED[\s=]*(\d+)/i);
     const irMatch = message.match(/IR[\s=]*(\d+)/i);
     const greenMatch = message.match(/GREEN[\s=]*(\d+)/i);
+    const selectedMatch = message.match(/(?:stored_sig|ppg_sig|signal|value)[\s=]*(\d+)/i);
 
-    if (!redMatch || !irMatch) return null;
+    if (!redMatch && !irMatch && !greenMatch && !selectedMatch) return null;
 
-    const red = clamp(parseInt(redMatch[1], 10), 0, 262143);
-    const ir = clamp(parseInt(irMatch[1], 10), 0, 262143);
-    const green = clamp(greenMatch ? parseInt(greenMatch[1], 10) : 0, 0, 262143);
+    const red = clamp(redMatch ? parseInt(redMatch[1], 10) : 0, 0, 262143);
+    const ir = clamp(irMatch ? parseInt(irMatch[1], 10) : 0, 0, 262143);
+    const green = clamp(
+      greenMatch
+        ? parseInt(greenMatch[1], 10)
+        : selectedMatch
+          ? parseInt(selectedMatch[1], 10)
+          : 0,
+      0,
+      262143,
+    );
 
     if (red === null || ir === null) return null;
 
@@ -220,14 +331,15 @@ function parseIMUCombined(message: string): IMUCombinedParsed | null {
     if (aVals.length !== 3 || gVals.length !== 3) return null;
     if (!aVals.every(v => v !== null) || !gVals.every(v => v !== null)) return null;
 
-    // NEW FORMAT: A[g] and G[dps] are ALREADY in standard units (no conversion needed)
-    // Values are already in g and dps respectively
-    const ax_mg = aVals[0] as number;
-    const ay_mg = aVals[1] as number;
-    const az_mg = aVals[2] as number;
-    const gx_mdps = gVals[0] as number;
-    const gy_mdps = gVals[1] as number;
-    const gz_mdps = gVals[2] as number;
+    // CONVERT TO APP/DB STANDARD UNITS:
+    // A[g] * 1000 = Accel in mg
+    // G[dps] * 1000 = Gyro in mdps
+    const ax_mg = (aVals[0] as number) * 1000;
+    const ay_mg = (aVals[1] as number) * 1000;
+    const az_mg = (aVals[2] as number) * 1000;
+    const gx_mdps = (gVals[0] as number) * 1000;
+    const gy_mdps = (gVals[1] as number) * 1000;
+    const gz_mdps = (gVals[2] as number) * 1000;
 
     // Extract uptime if present
     const tMatch = message.match(/t=(\d+)/);
@@ -356,8 +468,8 @@ function parseEDA(message: string): EDAParsed | null {
 
     if (!rawMatch || !mvMatch) return null;
 
-    const rawADC = clamp(parseInt(rawMatch[1], 10), 0, 65535);
-    const mv = clamp(parseFloat(mvMatch[1]), 0, 5000);
+    const rawADC = clamp(parseInt(rawMatch[1], 10), -32768, 32767);
+    const mv = clamp(parseFloat(mvMatch[1]), -5000, 5000);
 
     if (rawADC === null || mv === null) return null;
 
@@ -581,6 +693,146 @@ function parseStoredRawTemp(message: string): TemperatureParsed | null {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Firmware-specific parsers (algo_v0 BLE output)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse key=value pairs from a firmware CSV/space-separated line.
+ * Handles both comma-separated (PPG_STREAM,t=…) and space-separated (V0_MIN t=…).
+ */
+function parseFwKV(line: string): Record<string, number | string> {
+  const result: Record<string, number | string> = {};
+  // Match key=value where value is a number (int or float, possibly negative)
+  const numRe = /([A-Za-z][A-Za-z0-9_%]*)=(-?\d+(?:\.\d+)?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = numRe.exec(line)) !== null) {
+    result[m[1].toLowerCase()] = parseFloat(m[2]);
+  }
+  // Also capture string values like HR_q=GOOD  SLEEP=WAKE  ACT=REST
+  const strRe = /([A-Za-z][A-Za-z0-9_%]*)=([A-Z_]+)(?=[\s,]|$)/g;
+  while ((m = strRe.exec(line)) !== null) {
+    const key = m[1].toLowerCase();
+    if (!(key in result)) {
+      result[key] = m[2];
+    }
+  }
+  return result;
+}
+
+function getNum(kv: Record<string, number | string>, ...keys: string[]): number {
+  for (const k of keys) {
+    const v = kv[k.toLowerCase()];
+    if (typeof v === 'number') return v;
+  }
+  return 0;
+}
+
+function getStr(kv: Record<string, number | string>, ...keys: string[]): string {
+  for (const k of keys) {
+    const v = kv[k.toLowerCase()];
+    if (typeof v === 'string') return v;
+  }
+  return '';
+}
+
+/**
+ * Parse PPG_STREAM or PV line (per-sample algo output from algo_v0.c).
+ *
+ * Handles both full-firmware format (PPG_STREAM,…) and validation format (PV,…).
+ */
+export function parsePPGStream(line: string): PPGStreamParsed | null {
+  try {
+    const isPPGStream = line.startsWith('PPG_STREAM,') || line.startsWith('ppg_stream,');
+    const isPV = line.startsWith('PV,') || line.startsWith('pv,');
+    if (!isPPGStream && !isPV) return null;
+
+    const kv = parseFwKV(line);
+    const t_ms  = getNum(kv, 't', 't_ms');
+    const seq   = getNum(kv, 'seq');
+    const raw   = getNum(kv, 'raw', 'ppg_raw');
+    const green = getNum(kv, 'green', 'ppg_green');
+    const filt  = getNum(kv, 'filt', 'filtered');
+    const th    = getNum(kv, 'th', 'threshold');
+    const peak  = getNum(kv, 'peak', 'peak_flag') !== 0;
+    const ibi   = getNum(kv, 'ibi', 'ibi_ms');
+    const hr    = getNum(kv, 'hr', 'heart_rate');
+    const fs    = getNum(kv, 'fs', 'fs_hz');
+    const qok   = getNum(kv, 'qok', 'quality_ok') !== 0;
+    const sqi   = getNum(kv, 'sqi', 'ppg_sqi');
+    const art   = getNum(kv, 'art', 'artifact') !== 0;
+    const settle = getNum(kv, 'settle', 'settling') !== 0;
+
+    return { type: 'ppg_stream', t_ms, seq, raw, green, filt, th, peak, ibi_ms: ibi, hr, fs, qok, sqi, artifact: art, settling: settle };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse PV_WIN line (5-second quality window from algo_v0.c).
+ */
+export function parsePPGWindow(line: string): PPGWindowParsed | null {
+  try {
+    if (!line.startsWith('PV_WIN,') && !line.startsWith('pv_win,')) return null;
+    const kv = parseFwKV(line);
+    return {
+      type: 'ppg_window',
+      t_ms: getNum(kv, 't', 't_ms'),
+      ppg_n: getNum(kv, 'ppg_n'),
+      sqi: getNum(kv, 'sqi'),
+      clip_frac: getNum(kv, 'clip', 'clip_frac'),
+      saturation: getNum(kv, 'sat', 'saturation') !== 0,
+      artifact: getNum(kv, 'art', 'artifact') !== 0,
+      quality_ok: getNum(kv, 'qok', 'quality_ok') !== 0,
+      settling: getNum(kv, 'settle') !== 0,
+      sma: getNum(kv, 'sma'),
+      acc_var: getNum(kv, 'acc_var', 'accel_var'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse V0_MIN line (1-minute algo summary from algo_v0.c run_slow_60s).
+ *
+ * Format: V0_MIN t=<ms> ACT=REST act_conf=0.75 ART_frac=0.00 HR=72.3 HR_cov=60s HR_q=GOOD …
+ */
+export function parseV0Min(line: string): V0MinParsed | null {
+  try {
+    if (!line.includes('V0_MIN') && !line.includes('v0_min')) return null;
+    const kv = parseFwKV(line);
+    // Extract string-value fields with regex (more reliable for space-separated format)
+    const actMatch   = line.match(/ACT=([A-Z_]+)/i);
+    const hrqMatch   = line.match(/HR_q=([A-Z_]+)/i);
+    const hrvqMatch  = line.match(/HRV_q=([A-Z_]+)/i);
+    const sleepMatch = line.match(/SLEEP=([A-Z_]+)/i);
+    const tempqMatch = line.match(/TEMP_q=([A-Z_]+)/i);
+
+    return {
+      type: 'v0_min',
+      t_ms: getNum(kv, 't'),
+      activity: actMatch ? actMatch[1] : getStr(kv, 'act'),
+      act_conf: getNum(kv, 'act_conf'),
+      art_frac: getNum(kv, 'art_frac'),
+      hr_bpm: getNum(kv, 'hr'),
+      hr_coverage_sec: getNum(kv, 'hr_cov'),
+      hr_quality: hrqMatch ? hrqMatch[1] : getStr(kv, 'hr_q'),
+      hrv_rmssd_ms: getNum(kv, 'hrv_rmssd'),
+      hrv_quality: hrvqMatch ? hrvqMatch[1] : getStr(kv, 'hrv_q'),
+      eda_muSCL: getNum(kv, 'eda_muscl'),
+      eda_sigmaSCR: getNum(kv, 'eda_sigmascr'),
+      temp_c: getNum(kv, 'temp'),
+      temp_quality: tempqMatch ? tempqMatch[1] : getStr(kv, 'temp_q'),
+      sleep_state: sleepMatch ? sleepMatch[1] : getStr(kv, 'sleep'),
+      sleep_conf: getNum(kv, 'sleep_conf'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -605,12 +857,58 @@ export function parseSensorLine(line: string): ParsedSensorReading | null {
       return null;
     }
 
-    // --- FORMAT 2: LEGACY & RAW KEY-VALUE FORMAT ---
-    const colonIdx = line.indexOf(':');
-    if (colonIdx < 0) return null;
-    const prefix = line.substring(0, colonIdx).trim();
-    const message = line.substring(colonIdx + 1).trim();
-    
+    const cleanLine = line.trim();
+    const upperLine = cleanLine.toUpperCase();
+
+    // ── PRIORITY 1: Firmware algo_v0 BLE stream formats (Medical-Wristband-Firmware) ──
+    // These are checked FIRST because they don't use the standard "module:" prefix format.
+
+    // PPG_STREAM or PV (per-sample filtered PPG waveform + HR from algo_v0)
+    const ppgStreamAt = upperLine.indexOf('PPG_STREAM,');
+    const pvAt = upperLine.indexOf('PV,');
+    if (ppgStreamAt >= 0 || pvAt >= 0) {
+      const start = ppgStreamAt >= 0 ? ppgStreamAt : pvAt;
+      const result = parsePPGStream(cleanLine.slice(start));
+      return result;
+    }
+
+    // PV_WIN (5-second quality window from algo_v0)
+    const ppgWindowAt = upperLine.indexOf('PV_WIN,');
+    if (ppgWindowAt >= 0) {
+      return parsePPGWindow(cleanLine.slice(ppgWindowAt));
+    }
+
+    // V0_MIN (1-minute algo summary with HR, HRV, activity, sleep)
+    if (line.includes('V0_MIN') || line.includes('v0_min')) {
+      return parseV0Min(line);
+    }
+
+    // ── PRIORITY 2: LEGACY & RAW KEY-VALUE FORMAT (module: message) ──
+    // The custom BLE log backend may omit Zephyr module metadata (format flags
+    // are zero). Recognize the firmware payload itself before requiring a prefix.
+    if (
+      upperLine.includes('PPG OUT') ||
+      upperLine.includes('PPG FIFO') ||
+      upperLine.includes('WEAR_DBG') ||
+      upperLine.startsWith('RAW_PPG')
+    ) {
+      return parsePPG(cleanLine);
+    }
+    if (upperLine.includes('A[G]=') && upperLine.includes('G[DPS]=')) {
+      return parseIMUCombined(cleanLine);
+    }
+    if (
+      (upperLine.includes('FLAT_CNT') || upperLine.includes('DRAW=')) &&
+      upperLine.includes('RAW=') &&
+      upperLine.includes('MV=')
+    ) {
+      return parseEDA(cleanLine);
+    }
+
+    const prefix = extractModule(cleanLine);
+    const message = extractMessage(cleanLine);
+    if (prefix === 'unknown') return null;
+
     // Map prefix to module (Support STORED_RAW_, RAW_, and legacy formats)
     let module: SensorModule | null = null;
     if (prefix === 'STORED_RAW_PPG' || prefix === 'RAW_PPG') module = 'PPG';
@@ -618,42 +916,51 @@ export function parseSensorLine(line: string): ParsedSensorReading | null {
     else if (prefix === 'STORED_RAW_EDA' || prefix === 'RAW_EDA' || prefix === 'eda_raw') module = 'EDA';
     else if (prefix === 'STORED_RAW_TEMP' || prefix === 'RAW_TEMP') module = 'TEMP';
     else if (prefix === 'as6221_demo') module = 'TEMP';
-    else if (prefix === 'max30101_demo') module = 'PPG';
+    else if (prefix === 'max30101_demo') {
+      // Also try PPG_STREAM style parsing on the whole line (firmware PPG OUT lines)
+      module = 'PPG';
+    }
     else if (prefix === 'lsm6dso_app') module = 'IMU';
-    
+
     if (!module) return null;
 
     // Dispatch based on mapped module
     switch (module) {
       case 'PPG': {
-        const result = parseStoredRawPPG(message);
-        if (result) console.log('[Parser→Pipeline] PPG:', result);
+        let result = parseStoredRawPPG(message);
+        if (!result) {
+          result = parsePPG(message);
+        }
         return result;
       }
 
       case 'IMU': {
         let result = null;
-        // Check if this is combined or separate format
-        if (message.includes('ax_mg') || message.includes('A[g]=')) {
+        if (message.includes('A[g]=')) {
+          result = parseIMUCombined(message);
+        } else if (message.includes('ax_mg')) {
           result = parseStoredRawIMU(message);
         } else if (message.includes('G RAW')) {
           result = parseIMUGyro(message);
         } else if (message.includes('A RAW')) {
           result = parseIMUAccel(message);
         }
-        if (result) console.log('[Parser→Pipeline] IMU:', result);
         return result;
       }
 
       case 'EDA': {
-        const result = parseStoredRawEDA(message);
-        if (result) console.log('[Parser→Pipeline] EDA:', result);
-        return result;
+        // Live eda_raw lines include signed ADC/mV plus calibrated uS. Running
+        // them through the stored parser first clamps negatives and drops uS.
+        return prefix === 'STORED_RAW_EDA' || prefix === 'RAW_EDA'
+          ? parseStoredRawEDA(message)
+          : parseEDA(message);
       }
 
       case 'TEMP': {
-        const result = parseStoredRawTemp(message);
-        if (result) console.log('[Parser→Pipeline] TEMP:', result);
+        let result = parseStoredRawTemp(message);
+        if (!result) {
+          result = parseTemperature(message);
+        }
         return result;
       }
 

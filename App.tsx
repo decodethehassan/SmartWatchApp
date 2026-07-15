@@ -10,6 +10,7 @@ import { ActivityIndicator, Text, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import RootNavigator from './src/navigation/RootNavigator';
 import MainTabsNavigator from './src/navigation/MainTabsNavigator';
+import { SensorErrorBoundary } from './src/components/SensorErrorBoundary';
 
 /**
  * AppContent – rendered inside AuthProvider so it can call useAuth().
@@ -42,18 +43,20 @@ function AppContent() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <StatusBar style="auto" />
-      <AuthProvider>
-        <BLEProvider>
-          <DevModeProvider>
-            <SensorPipelineProvider>
-              <NavigationContainer>
-                <AppContent />
-              </NavigationContainer>
-            </SensorPipelineProvider>
-          </DevModeProvider>
-        </BLEProvider>
-      </AuthProvider>
+      <SensorErrorBoundary>
+        <StatusBar style="auto" />
+        <AuthProvider>
+          <BLEProvider>
+            <DevModeProvider>
+              <SensorPipelineProvider>
+                <NavigationContainer>
+                  <AppContent />
+                </NavigationContainer>
+              </SensorPipelineProvider>
+            </DevModeProvider>
+          </BLEProvider>
+        </AuthProvider>
+      </SensorErrorBoundary>
     </SafeAreaProvider>
   );
 }

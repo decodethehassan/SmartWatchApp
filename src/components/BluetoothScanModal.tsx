@@ -257,7 +257,7 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
                   Please turn on Bluetooth to scan and connect devices.
                 </Text>
                 <TouchableOpacity
-                  style={[styles.doneButton, { width: '100%', marginHorizontal: 0, marginTop: 12, backgroundColor: Platform.OS === 'android' ? '#2563eb' : '#ef4444' }]}
+                  style={[styles.doneButton, { width: '100%', marginHorizontal: 0, marginTop: 12, backgroundColor: '#1B4965' }]}
                   onPress={enableBluetooth}
                 >
                   <Text style={styles.doneButtonText}>
@@ -341,7 +341,7 @@ const styles = StyleSheet.create({
   statusBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#eff6ff',
+    backgroundColor: '#1B49650F', // 10% primary Navy
     paddingHorizontal: 16,
     paddingVertical: 10,
     gap: 8,
@@ -351,7 +351,7 @@ const styles = StyleSheet.create({
   },
   statusText: {
     fontSize: 14,
-    color: '#3b82f6',
+    color: '#1B4965', // primary Navy
     fontWeight: '500',
     flex: 1,
   },
@@ -457,7 +457,7 @@ const styles = StyleSheet.create({
   },
   connectionSummary: {
     flexDirection: 'row',
-    backgroundColor: '#12121e',
+    backgroundColor: '#1B49650F', // 10% primary Navy
     borderRadius: 10,
     padding: 12,
     marginBottom: 16,
@@ -476,22 +476,23 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginTop: 4,
     textAlign: 'center',
+    color: '#1B4965',
   },
   summaryDivider: {
     width: 1,
     height: 30,
-    backgroundColor: '#2e2e3e',
+    backgroundColor: '#1B49651C', // 11% opacity Navy
   },
   deviceCard: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#1e1e2e',
+    backgroundColor: '#ffffff', // White card
     borderRadius: 12,
     padding: 16,
     marginVertical: 6,
     borderWidth: 1,
-    borderColor: '#2e2e3e',
+    borderColor: '#e2e8f0', // Light grey border
   },
   deviceInfo: {
     flex: 1,
@@ -499,11 +500,11 @@ const styles = StyleSheet.create({
   deviceName: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#ffffff',
+    color: '#1e293b', // Dark text color
   },
   deviceType: {
     fontSize: 12,
-    color: '#a0a0b0',
+    color: '#64748b', // Grey secondary text
     marginTop: 2,
   },
   statusRow: {
@@ -523,7 +524,7 @@ const styles = StyleSheet.create({
   },
   deviceMac: {
     fontSize: 10,
-    color: '#555570',
+    color: '#94a3b8', // Light grey text color
     marginTop: 4,
   },
   buttonCol: {
@@ -571,7 +572,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   doneButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: '#1B4965', // primary Navy
     marginHorizontal: 16,
     marginTop: 8,
     paddingVertical: 14,
