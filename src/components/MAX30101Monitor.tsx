@@ -3,11 +3,11 @@
  *
  * Upgraded to use data from the Medical-Wristband-Firmware (algo_v0):
  *
- *   • Real-time PPG waveform from `PPG_STREAM` / `PV` BLE lines (filt signal)
- *   • Firmware-computed heart rate (not a client-side estimate)
- *   • Signal quality (SQI, artifact, qok) from `PV_WIN` 5-second windows
- *   • HRV (RMSSD) and activity from `V0_MIN` 1-minute summaries
- *   • Raw channel values (RED / IR / GREEN) from legacy `PPG OUT` lines
+ *   • Real-time waveform from compact `C` records (`clean` field)
+ *   • Firmware-computed HR, IBI, SQI, AC/DC, HRQ, RMSSD and PRV flags
+ *   • Exact qok / artifact / contact flags used by the desktop HTML GUI
+ *   • HRV, activity, EDA, temperature and sleep from compact `M` summaries
+ *   • Raw GREEN value from compact C; RED/IR remain legacy-only when available
  *   • Cloud sync via Firebase (HR + PPG already handled in useSensorPipeline)
  *
  * Data flow:
@@ -122,7 +122,7 @@ export const MAX30101Monitor: React.FC = () => {
         {/* Firmware badge */}
         <View style={styles.firmwareBadge}>
           <Text style={styles.firmwareBadgeText}>
-            algo_v0 · PPG_FULLFW_STREAM_ENABLE=1 · PPG_STREAM_DIV=2 (~50 Hz)
+            compact C stream · internal PPG 100 Hz · BLE display ~25 Hz + peak frames
           </Text>
         </View>
       </LinearGradient>
@@ -146,9 +146,12 @@ export const MAX30101Monitor: React.FC = () => {
       {activeTab === 'waveform' && (
         <View style={styles.tabContent}>
           <PPGWaveformCard
-            filtSamples={ppgStream.filt}
-            thSamples={ppgStream.th}
+            cleanSamples={ppgStream.filt}
+            timestamps={ppgStream.timestamps}
             peakFlags={ppgStream.peaks}
+            qualityFlags={ppgStream.qualityFlags}
+            artifactFlags={ppgStream.artifactFlags}
+            contactFlags={ppgStream.contactFlags}
             hrBpm={heartRate.bpm}
             confidence={heartRate.confidence}
             sqi={ppgQuality.sqi}
@@ -156,6 +159,12 @@ export const MAX30101Monitor: React.FC = () => {
             qualityOk={ppgQuality.qualityOk}
             wearDetected={ppgQuality.wearDetected}
             ibi_ms={heartRate.ibi_ms}
+            fsHz={ppgStream.fsHz}
+            acdc={ppgStream.acdc}
+            hrQuality={ppgStream.hrQuality}
+            rmssdMs={ppgStream.rmssdMs}
+            prvReady={ppgStream.prvReady}
+            ibiCv={ppgStream.ibiCv}
           />
 
           {/* Raw channels */}
@@ -261,9 +270,9 @@ export const MAX30101Monitor: React.FC = () => {
       {activeTab === 'quality' && (
         <View style={styles.tabContent}>
           <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Signal Quality (5-sec windows)</Text>
+            <Text style={styles.sectionTitle}>Signal Quality — Compact C Stream</Text>
             <Text style={styles.sectionSub}>
-              Source: PV_WIN from algo_v0 — updated every 5 seconds
+              Same qok, artifact, contact, SQI, AC/DC and HRQ values as the PC GUI
             </Text>
 
             <View style={[styles.qualityBlock, { borderColor: ppgQuality.qualityOk ? '#10b981' : '#f59e0b' }]}>
@@ -277,8 +286,11 @@ export const MAX30101Monitor: React.FC = () => {
               <View style={styles.qualityRows}>
                 <QualityRow label="SQI" value={`${(ppgQuality.sqi * 100).toFixed(0)}%`} good={ppgQuality.sqi >= 0.5} />
                 <QualityRow label="Motion Artifact" value={ppgQuality.artifact ? 'Detected' : 'None'} good={!ppgQuality.artifact} />
-                <QualityRow label="Wear Detection" value={ppgQuality.wearDetected ? 'Worn' : 'Not worn'} good={ppgQuality.wearDetected} />
+                <QualityRow label="Contact Artifact" value={ppgQuality.contactArtifact ? 'Detected' : 'None'} good={!ppgQuality.contactArtifact} />
                 <QualityRow label="Quality Gate (qok)" value={ppgQuality.qualityOk ? 'OPEN' : 'CLOSED'} good={ppgQuality.qualityOk} />
+                <QualityRow label="AC/DC" value={ppgQuality.acdc >= 0 ? ppgQuality.acdc.toFixed(5) : '--'} good={ppgQuality.acdc >= 0.0015} />
+                <QualityRow label="HR Quality" value={String(ppgQuality.hrQuality)} good={ppgQuality.hrQuality >= 2} />
+                <QualityRow label="PRV Ready" value={ppgQuality.prvReady ? 'YES' : 'NO'} good={ppgQuality.prvReady} />
                 <QualityRow
                   label="HR Confidence"
                   value={heartRate.confidence.toUpperCase()}
@@ -293,11 +305,10 @@ export const MAX30101Monitor: React.FC = () => {
             <Text style={styles.sectionTitle}>How it works</Text>
             <Text style={styles.sectionSub}>Medical-Wristband-Firmware algo_v0</Text>
             <Text style={styles.explainText}>
-              The firmware runs a high-pass filter + adaptive peak detector on the GREEN channel at 100 Hz.
-              Every sample is streamed over BLE as {`PPG_STREAM,t=…,filt=…,th=…,peak=…,hr=…`}.{'\n\n'}
-              Every 5 seconds the firmware evaluates SQI (spectral quality index), motion artifacts, and saturation to decide if the `qok` quality gate opens.{'\n\n'}
-              Heart rate is only reported when `qok=1` — no quality gate = no reading, preventing false HR values.{'\n\n'}
-              Every 60 seconds, `V0_MIN` sends a definitive HR + HRV (RMSSD) for cloud storage.
+              The firmware processes the GREEN PPG internally at 100 Hz and sends the compact C record at approximately 25 Hz plus accepted peak frames.{'\n\n'}
+              The app plots C.clean directly, uses firmware timestamps, and applies the same centred 5-sample smoothing and 5th/95th percentile normalisation as the PC HTML GUI.{'\n\n'}
+              qok, artifact and contact decide whether a region is good. Accepted C.peak samples are marked in orange only when that same quality rule passes.{'\n\n'}
+              Every 60 seconds, compact M sends the complete activity, HR, HRV, EDA, temperature and sleep summary.
             </Text>
           </View>
         </View>

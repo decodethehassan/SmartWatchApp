@@ -13,6 +13,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { LineChart } from 'react-native-chart-kit';
 import { useSharedSensorPipeline } from '../../hooks/SensorPipelineContext';
 import { useBLE } from '../../functionality/BLEContext';
+import { useAuth } from '../../auth/AuthContext';
+import { memorySyncService, type MemorySyncState } from '../../functionality/MemorySyncService';
+import { getMinuteSummariesForRange } from '../../firebase/dataLogger';
+import type { MinuteSummaryReading } from '../../firebase/sensorTypes';
 import PPGWaveformCard from '../../components/PPGWaveformCard';
 
 // ─── Memoized PhysioChart Component ───────────────────────────────────────────
@@ -91,6 +95,37 @@ const liveLabels = (count: number) =>
   Array.from({ length: Math.max(count, 2) }, (_, index) =>
     index === Math.max(count, 2) - 1 ? 'Now' : '',
   );
+
+const downsample = <T,>(values: T[], maxPoints = 48): T[] => {
+  if (values.length <= maxPoints) return values;
+  const step = values.length / maxPoints;
+  return Array.from({ length: maxPoints }, (_, i) => values[Math.min(values.length - 1, Math.floor(i * step))]);
+};
+
+const formatMinutes = (minutes: number): string => {
+  const safe = Math.max(0, Math.round(minutes));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  return h > 0 ? `${h}h ${m}min` : `${m}min`;
+};
+
+const timestampToDate = (value: any): Date | null => {
+  try {
+    if (value?.toDate) return value.toDate();
+    if (value instanceof Date) return value;
+  } catch { }
+  return null;
+};
+
+const historicalLabels = (records: Array<{ timestamp: any }>): string[] =>
+  records.map((record, index) => {
+    if (records.length > 12 && index % Math.max(1, Math.floor(records.length / 8)) !== 0 && index !== records.length - 1) {
+      return '';
+    }
+    const date = timestampToDate(record.timestamp);
+    if (!date) return '';
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  });
 
 const COLORS = {
   primary: '#1B4965',
@@ -257,7 +292,7 @@ function ActivityBar({ label, duration, fraction, color }: {
         <View
           style={[
             styles.activityFill,
-            { width: `${Math.max(fraction * 100, 3)}%`, backgroundColor: color },
+            { width: fraction <= 0 ? '0%' : `${Math.max(fraction * 100, 3)}%`, backgroundColor: color },
           ]}
         />
       </View>
@@ -270,8 +305,12 @@ function ActivityBar({ label, duration, fraction, color }: {
 export default function PhysiologicalInsightScreen() {
   const [timeRange, setTimeRange] = useState<TimeRange>('Day');
   const [history, setHistory] = useState<LiveHistory>(EMPTY_HISTORY);
+  const [storedDay, setStoredDay] = useState<Array<MinuteSummaryReading & { id: string }>>([]);
+  const [storedDayLoading, setStoredDayLoading] = useState(false);
+  const [memorySync, setMemorySync] = useState<MemorySyncState>(memorySyncService.getState());
   const { live } = useSharedSensorPipeline();
-  const { isConnected } = useBLE();
+  const { user } = useAuth();
+  const { isConnected, connectedDevice, connectedDeviceName } = useBLE();
   const lastCaptured = useRef({
     ppg: 0,
     heartRate: 0,
@@ -282,6 +321,55 @@ export default function PhysiologicalInsightScreen() {
   });
 
   const data = DUMMY_DATA[timeRange];
+
+  useEffect(() => memorySyncService.subscribe(setMemorySync), []);
+
+  // Load today's historical minute summaries from Firestore. This runs on
+  // screen entry and again after a successful wristband-memory sync.
+  useEffect(() => {
+    let cancelled = false;
+    if (!user?.uid) {
+      setStoredDay([]);
+      return () => { cancelled = true; };
+    }
+
+    const loadStoredDay = async () => {
+      setStoredDayLoading(true);
+      try {
+        const start = new Date();
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 1);
+        end.setMilliseconds(-1);
+        const rows = await getMinuteSummariesForRange(user.uid, start, end);
+        if (!cancelled) setStoredDay(rows);
+      } catch (error) {
+        console.warn('[PhysiologicalInsight] Failed to load stored day results:', error);
+      } finally {
+        if (!cancelled) setStoredDayLoading(false);
+      }
+    };
+
+    void loadStoredDay();
+    return () => { cancelled = true; };
+  }, [user?.uid, memorySync.phase === 'complete' ? memorySync.lastSyncedIndex : -1]);
+
+  const handleMemorySync = async () => {
+    if (!user?.uid || !isConnected) return;
+    await memorySyncService.startSync({
+      userId: user.uid,
+      deviceId: connectedDevice?.id,
+      deviceName: connectedDeviceName || undefined,
+    });
+  };
+
+  const memoryBusy = ['checking', 'syncing', 'saving', 'stopping'].includes(memorySync.phase);
+
+  useEffect(() => {
+    if (!isConnected && memoryBusy) {
+      void memorySyncService.handleDisconnected();
+    }
+  }, [isConnected, memoryBusy]);
 
   // Capture each new device sample once. Histories are bounded, so the charts
   // remain responsive even when the wristband runs for hours.
@@ -318,15 +406,32 @@ export default function PhysiologicalInsightScreen() {
       }
       if (changed.heartRate) next.heartRate = appendLive(prev.heartRate, live.heartRate.bpm);
       if (changed.hrv) next.hrv = appendLive(prev.hrv, live.hrv.rmssd_ms);
-      if (changed.temperature) next.temperature = appendLive(prev.temperature, live.temperature.tempC);
-      if (changed.eda) next.eda = appendLive(prev.eda, live.eda.conductance_uS);
+      if (changed.temperature) {
+        next.temperature = live.temperatureStream.values_c.length
+          ? live.temperatureStream.values_c.slice(-LIVE_HISTORY_SIZE)
+          : appendLive(prev.temperature, live.temperature.tempC);
+      }
+      if (changed.eda) {
+        next.eda = live.edaStream.values_uS.length
+          ? live.edaStream.values_uS.slice(-LIVE_HISTORY_SIZE)
+          : appendLive(prev.eda, live.eda.conductance_uS);
+      }
       if (changed.imu) {
-        next.accelX = appendLive(prev.accelX, live.accel.x);
-        next.accelY = appendLive(prev.accelY, live.accel.y);
-        next.accelZ = appendLive(prev.accelZ, live.accel.z);
-        next.gyroX = appendLive(prev.gyroX, live.gyro.x);
-        next.gyroY = appendLive(prev.gyroY, live.gyro.y);
-        next.gyroZ = appendLive(prev.gyroZ, live.gyro.z);
+        if (live.imuStream.timestamps.length) {
+          next.accelX = live.imuStream.ax_g.slice(-LIVE_HISTORY_SIZE);
+          next.accelY = live.imuStream.ay_g.slice(-LIVE_HISTORY_SIZE);
+          next.accelZ = live.imuStream.az_g.slice(-LIVE_HISTORY_SIZE);
+          next.gyroX = live.imuStream.gx_dps.slice(-LIVE_HISTORY_SIZE);
+          next.gyroY = live.imuStream.gy_dps.slice(-LIVE_HISTORY_SIZE);
+          next.gyroZ = live.imuStream.gz_dps.slice(-LIVE_HISTORY_SIZE);
+        } else {
+          next.accelX = appendLive(prev.accelX, live.accel.x / 1000);
+          next.accelY = appendLive(prev.accelY, live.accel.y / 1000);
+          next.accelZ = appendLive(prev.accelZ, live.accel.z / 1000);
+          next.gyroX = appendLive(prev.gyroX, live.gyro.x / 1000);
+          next.gyroY = appendLive(prev.gyroY, live.gyro.y / 1000);
+          next.gyroZ = appendLive(prev.gyroZ, live.gyro.z / 1000);
+        }
       }
       return next;
     });
@@ -354,43 +459,81 @@ export default function PhysiologicalInsightScreen() {
 
   const isHrLive = Boolean(hrFresh && live?.heartRate?.bpm && live.heartRate.bpm > 0);
 
+  const storedHr = useMemo(() => downsample(storedDay.filter(r => r.heartRate > 0 && r.hrQuality !== 'INVALID'), 48), [storedDay]);
+  const storedHrv = useMemo(() => downsample(storedDay.filter(r => r.hrvRmssdMs > 0 && r.hrvQuality !== 'INVALID'), 48), [storedDay]);
+  const storedTemp = useMemo(() => downsample(storedDay.filter(r => r.temperatureC > 0 && r.temperatureQuality !== 'INVALID'), 48), [storedDay]);
+  const storedEda = useMemo(() => downsample(storedDay.filter(r => r.edaMuScl >= 0 && r.edaQuality !== 'INVALID'), 48), [storedDay]);
+
+  const activitySummary = useMemo(() => {
+    const counts = { REST: 0, LOW: 0, WALK: 0, VIG: 0 };
+    for (const row of storedDay) {
+      const key = String(row.activity || '').toUpperCase() as keyof typeof counts;
+      if (key in counts) counts[key] += 1;
+    }
+    const classified = counts.REST + counts.LOW + counts.WALK + counts.VIG;
+    const sleepMinutes = storedDay.filter(r => String(r.sleepState).toUpperCase() === 'SLEEP').length;
+    const sleepConfidenceValues = storedDay
+      .filter(r => String(r.sleepState).toUpperCase() === 'SLEEP' && Number.isFinite(r.sleepConfidence))
+      .map(r => r.sleepConfidence);
+    const avgSleepConfidence = sleepConfidenceValues.length
+      ? sleepConfidenceValues.reduce((a, b) => a + b, 0) / sleepConfidenceValues.length
+      : 0;
+    return { counts, classified, sleepMinutes, avgSleepConfidence };
+  }, [storedDay]);
+
   // Memoized Chart Configs to prevent re-creation and CPU spikes
   const hrChartConfig = useMemo(() => makeChartConfig(COLORS.error, 0), []);
   const hrvChartConfig = useMemo(() => makeChartConfig('#f97316', 0), []);
   const tempChartConfig = useMemo(() => makeChartConfig('#f97316', 1), []);
   const edaChartConfig = useMemo(() => makeChartConfig(COLORS.accent, 1), []);
   const ppgChartConfig = useMemo(() => makeChartConfig('#10b981', 0), []);
-  const imuChartConfig = useMemo(() => makeChartConfig('#2563eb', 0), []);
-  const gyroChartConfig = useMemo(() => makeChartConfig('#7c3aed', 0), []);
+  const imuChartConfig = useMemo(() => makeChartConfig('#2563eb', 3), []);
+  const gyroChartConfig = useMemo(() => makeChartConfig('#7c3aed', 2), []);
 
   // Memoized Chart Data objects to avoid re-rendering
-  const hrChartData = useMemo(() => ({
-    labels: timeRange === 'Day'
-      ? liveLabels(displaySeries(history.heartRate, [0, 0]).length)
-      : data.hrLabels,
-    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.heartRate, [0, 0]) : data.hr }],
-  }), [data.hrLabels, data.hr, history.heartRate, timeRange]);
+  const hrChartData = useMemo(() => {
+    const useStored = timeRange === 'Day' && storedHr.length > 0;
+    const liveValues = displaySeries(history.heartRate, [0, 0]);
+    return {
+      labels: timeRange === 'Day'
+        ? useStored ? historicalLabels(storedHr) : liveLabels(liveValues.length)
+        : data.hrLabels,
+      datasets: [{ data: timeRange === 'Day' ? (useStored ? storedHr.map(r => r.heartRate) : liveValues) : data.hr }],
+    };
+  }, [data.hrLabels, data.hr, history.heartRate, storedHr, timeRange]);
 
-  const hrvChartData = useMemo(() => ({
-    labels: timeRange === 'Day'
-      ? liveLabels(displaySeries(history.hrv, [0, 0]).length)
-      : data.hrvLabels,
-    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.hrv, [0, 0]) : data.hrv }],
-  }), [data.hrvLabels, data.hrv, history.hrv, timeRange]);
+  const hrvChartData = useMemo(() => {
+    const useStored = timeRange === 'Day' && storedHrv.length > 0;
+    const liveValues = displaySeries(history.hrv, [0, 0]);
+    return {
+      labels: timeRange === 'Day'
+        ? useStored ? historicalLabels(storedHrv) : liveLabels(liveValues.length)
+        : data.hrvLabels,
+      datasets: [{ data: timeRange === 'Day' ? (useStored ? storedHrv.map(r => r.hrvRmssdMs) : liveValues) : data.hrv }],
+    };
+  }, [data.hrvLabels, data.hrv, history.hrv, storedHrv, timeRange]);
 
-  const tempChartData = useMemo(() => ({
-    labels: timeRange === 'Day'
-      ? liveLabels(displaySeries(history.temperature, [0, 0]).length)
-      : data.tempLabels,
-    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.temperature, [0, 0]) : data.temp }],
-  }), [data.tempLabels, data.temp, history.temperature, timeRange]);
+  const tempChartData = useMemo(() => {
+    const useStored = timeRange === 'Day' && storedTemp.length > 0;
+    const liveValues = displaySeries(history.temperature, [0, 0]);
+    return {
+      labels: timeRange === 'Day'
+        ? useStored ? historicalLabels(storedTemp) : liveLabels(liveValues.length)
+        : data.tempLabels,
+      datasets: [{ data: timeRange === 'Day' ? (useStored ? storedTemp.map(r => r.temperatureC) : liveValues) : data.temp }],
+    };
+  }, [data.tempLabels, data.temp, history.temperature, storedTemp, timeRange]);
 
-  const edaChartData = useMemo(() => ({
-    labels: timeRange === 'Day'
-      ? liveLabels(displaySeries(history.eda, [0, 0]).length)
-      : data.edaLabels,
-    datasets: [{ data: timeRange === 'Day' ? displaySeries(history.eda, [0, 0]) : data.eda }],
-  }), [data.edaLabels, data.eda, history.eda, timeRange]);
+  const edaChartData = useMemo(() => {
+    const useStored = timeRange === 'Day' && storedEda.length > 0;
+    const liveValues = displaySeries(history.eda, [0, 0]);
+    return {
+      labels: timeRange === 'Day'
+        ? useStored ? historicalLabels(storedEda) : liveLabels(liveValues.length)
+        : data.edaLabels,
+      datasets: [{ data: timeRange === 'Day' ? (useStored ? storedEda.map(r => r.edaMuScl) : liveValues) : data.eda }],
+    };
+  }, [data.edaLabels, data.eda, history.eda, storedEda, timeRange]);
 
   const ppgChartData = useMemo(() => {
     const green = displaySeries(history.ppgGreen, [0, 0]);
@@ -474,12 +617,66 @@ export default function PhysiologicalInsightScreen() {
           })}
         </View>
 
+        {/* ── Offline Wristband Memory Sync ─────────────────────────────── */}
+        <View style={styles.memoryCard}>
+          <View style={styles.memoryHeader}>
+            <View style={styles.memoryIconWrap}>
+              <Ionicons name="cloud-download-outline" size={20} color={COLORS.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.memoryTitle}>Wristband Memory</Text>
+              <Text style={styles.memorySubtitle}>{memorySync.message}</Text>
+            </View>
+          </View>
+
+          <View style={styles.memoryMetaRow}>
+            <Text style={styles.memoryMeta}>
+              Stored: {memorySync.info ? `${memorySync.info.historyCount}/${memorySync.info.historyCapacity} min` : '--'}
+            </Text>
+            <Text style={styles.memoryMeta}>Today's cloud results: {storedDayLoading ? '…' : storedDay.length}</Text>
+          </View>
+
+          {memoryBusy || memorySync.phase === 'complete' ? (
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${Math.max(0, Math.min(100, memorySync.progress * 100))}%` }]} />
+            </View>
+          ) : null}
+
+          {memorySync.error ? <Text style={styles.memoryError}>{memorySync.error}</Text> : null}
+
+          <View style={styles.memoryActions}>
+            <TouchableOpacity
+              style={[styles.syncButton, (!isConnected || !user || memoryBusy) && styles.syncButtonDisabled]}
+              disabled={!isConnected || !user || memoryBusy}
+              onPress={handleMemorySync}
+            >
+              <Ionicons name="sync" size={16} color="#ffffff" />
+              <Text style={styles.syncButtonText}>
+                {memoryBusy ? 'Syncing…' : memorySync.phase === 'complete' ? 'Sync New Data' : 'Sync Memory'}
+              </Text>
+            </TouchableOpacity>
+
+            {memoryBusy ? (
+              <TouchableOpacity style={styles.stopSyncButton} onPress={() => { void memorySyncService.stopSync(); }}>
+                <Text style={styles.stopSyncText}>Stop</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          <Text style={styles.memoryFootnote}>
+            Downloads stored 60-second Algorithm V0 results. Live high-rate BLE is paused by firmware during transfer and resumes automatically afterward.
+          </Text>
+        </View>
+
         {/* ── Real-time PPG Waveform Display (New Feature) ── */}
         <View style={{ paddingHorizontal: 16, marginBottom: 14 }}>
           <PPGWaveformCard
-            filtSamples={live.ppgStream.filt}
-            thSamples={live.ppgStream.th}
+            cleanSamples={live.ppgStream.filt}
+            timestamps={live.ppgStream.timestamps}
             peakFlags={live.ppgStream.peaks}
+            qualityFlags={live.ppgStream.qualityFlags}
+            artifactFlags={live.ppgStream.artifactFlags}
+            contactFlags={live.ppgStream.contactFlags}
             hrBpm={live.heartRate.bpm}
             confidence={live.heartRate.confidence}
             sqi={live.ppgQuality.sqi}
@@ -487,6 +684,12 @@ export default function PhysiologicalInsightScreen() {
             qualityOk={live.ppgQuality.qualityOk}
             wearDetected={live.ppgQuality.wearDetected}
             ibi_ms={live.heartRate.ibi_ms}
+            fsHz={live.ppgStream.fsHz}
+            acdc={live.ppgStream.acdc}
+            hrQuality={live.ppgStream.hrQuality}
+            rmssdMs={live.ppgStream.rmssdMs}
+            prvReady={live.ppgStream.prvReady}
+            ibiCv={live.ppgStream.ibiCv}
           />
         </View>
 
@@ -549,10 +752,10 @@ export default function PhysiologicalInsightScreen() {
           icon="move"
           title="Accelerometer"
           subtitle={hasFresh(live.accel.lastUpdated)
-            ? 'X ' + live.accel.x.toFixed(0) + ' / Y ' + live.accel.y.toFixed(0)
-              + ' / Z ' + live.accel.z.toFixed(0) + ' mg'
+            ? 'X ' + (live.accel.x / 1000).toFixed(3) + ' / Y ' + (live.accel.y / 1000).toFixed(3)
+              + ' / Z ' + (live.accel.z / 1000).toFixed(3) + ' g'
             : 'Waiting for LSM6DSO data'}
-          description="Live wrist acceleration in milli-g from the LSM6DSO."
+          description="Direct compact I-stream wrist acceleration in g, matching the PC GUI."
         >
           <PhysioChart
             data={accelChartData}
@@ -567,10 +770,10 @@ export default function PhysiologicalInsightScreen() {
           icon="sync"
           title="Gyroscope"
           subtitle={hasFresh(live.gyro.lastUpdated)
-            ? 'X ' + live.gyro.x.toFixed(0) + ' / Y ' + live.gyro.y.toFixed(0)
-              + ' / Z ' + live.gyro.z.toFixed(0) + ' mdps'
+            ? 'X ' + (live.gyro.x / 1000).toFixed(2) + ' / Y ' + (live.gyro.y / 1000).toFixed(2)
+              + ' / Z ' + (live.gyro.z / 1000).toFixed(2) + ' dps'
             : 'Waiting for LSM6DSO data'}
-          description="Live angular velocity in milli-degrees per second from the LSM6DSO."
+          description="Direct compact I-stream angular velocity in dps, matching the PC GUI."
         >
           <PhysioChart
             data={gyroChartData}
@@ -584,19 +787,32 @@ export default function PhysiologicalInsightScreen() {
           accent={COLORS.accent}
           icon="fitness"
           title="Activity Insight"
-          subtitle={live.activity.state !== 'UNKNOWN'
-            ? live.activity.state + ' / ' + Math.round(live.activity.confidence * 100) + '% confidence'
-            : 'Waiting for firmware activity summary'}
-          description="Movement breakdown based on wristband accelerometer and gyroscope data."
+          subtitle={storedDay.length > 0
+            ? `${activitySummary.classified} stored minute classifications today`
+            : live.activity.state !== 'UNKNOWN'
+              ? live.activity.state + ' / ' + Math.round(live.activity.confidence * 100) + '% confidence'
+              : 'Waiting for firmware activity summary'}
+          description={storedDay.length > 0
+            ? "Today\'s activity breakdown from synchronized Algorithm V0 minute results."
+            : 'Movement breakdown based on the current wristband activity summary.'}
         >
-          <View style={styles.activityContainer}>
-            <Text style={styles.cardDescription}>
-              Acceleration magnitude: {live.accel.magnitude.toFixed(0)} mg
-            </Text>
-            <Text style={styles.cardDescription}>
-              Angular velocity magnitude: {live.gyro.magnitude.toFixed(0)} mdps
-            </Text>
-          </View>
+          {storedDay.length > 0 && activitySummary.classified > 0 ? (
+            <View style={styles.activityContainer}>
+              <ActivityBar label="Rest" duration={formatMinutes(activitySummary.counts.REST)} fraction={activitySummary.counts.REST / activitySummary.classified} color={COLORS.textLight} />
+              <ActivityBar label="Low Activity" duration={formatMinutes(activitySummary.counts.LOW)} fraction={activitySummary.counts.LOW / activitySummary.classified} color={COLORS.accent} />
+              <ActivityBar label="Walking" duration={formatMinutes(activitySummary.counts.WALK)} fraction={activitySummary.counts.WALK / activitySummary.classified} color="#2B6E8F" />
+              <ActivityBar label="Vigorous" duration={formatMinutes(activitySummary.counts.VIG)} fraction={activitySummary.counts.VIG / activitySummary.classified} color={COLORS.primary} />
+            </View>
+          ) : (
+            <View style={styles.activityContainer}>
+              <Text style={styles.cardDescription}>
+                Acceleration magnitude: {(live.accel.magnitude / 1000).toFixed(3)} g
+              </Text>
+              <Text style={styles.cardDescription}>
+                Angular velocity magnitude: {(live.gyro.magnitude / 1000).toFixed(2)} dps
+              </Text>
+            </View>
+          )}
         </MetricCard>
 
         {/* ── Skin Temperature ────────────────────────────────────────────── */}
@@ -635,7 +851,21 @@ export default function PhysiologicalInsightScreen() {
 
         {/* ── Coming Soon Cards ───────────────────────────────────────────── */}
         <ComingSoonCard title="Blood Pressure & SpO2" icon="water" />
-        <ComingSoonCard title="Sleep Insight" icon="moon" />
+        {storedDay.length > 0 ? (
+          <MetricCard
+            accent="#6366f1"
+            icon="moon"
+            title="Sleep Insight"
+            subtitle={`${formatMinutes(activitySummary.sleepMinutes)} sleep-likely today`}
+            description="Algorithm V0 sleep-likelihood only; this is not REM/light/deep sleep staging."
+          >
+            <Text style={styles.cardDescription}>
+              Average sleep confidence: {Math.round(activitySummary.avgSleepConfidence * 100)}%
+            </Text>
+          </MetricCard>
+        ) : (
+          <ComingSoonCard title="Sleep Insight" icon="moon" />
+        )}
 
         {/* ── Overall Wellness Score ──────────────────────────────────────── */}
         <View style={styles.scoreCard}>
@@ -735,6 +965,110 @@ const styles = StyleSheet.create({
   timeTabTextActive: {
     color: COLORS.primary,
     fontWeight: '800',
+  },
+
+  // Offline memory sync
+  memoryCard: {
+    marginHorizontal: 16,
+    marginBottom: 14,
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  memoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  memoryIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: COLORS.primary + '12',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  memoryTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  memorySubtitle: {
+    marginTop: 2,
+    fontSize: 11,
+    color: COLORS.textSecondary,
+  },
+  memoryMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginTop: 12,
+  },
+  memoryMeta: {
+    flex: 1,
+    fontSize: 11,
+    color: COLORS.textSecondary,
+  },
+  progressTrack: {
+    height: 7,
+    marginTop: 12,
+    borderRadius: 4,
+    backgroundColor: COLORS.border,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 4,
+    backgroundColor: COLORS.accent,
+  },
+  memoryActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 12,
+  },
+  syncButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingVertical: 11,
+    borderRadius: 10,
+    backgroundColor: COLORS.primary,
+  },
+  syncButtonDisabled: {
+    opacity: 0.45,
+  },
+  syncButtonText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  stopSyncButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.error,
+  },
+  stopSyncText: {
+    color: COLORS.error,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  memoryError: {
+    marginTop: 8,
+    fontSize: 11,
+    color: COLORS.error,
+  },
+  memoryFootnote: {
+    marginTop: 10,
+    fontSize: 10,
+    lineHeight: 14,
+    color: COLORS.textLight,
   },
 
   // Metric Card

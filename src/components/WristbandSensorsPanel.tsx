@@ -68,14 +68,14 @@ export const WristbandSensorsPanel: React.FC = () => {
     PPG_IR: { type: 'PPG_IR', label: 'PPG-IR', value: 0, unit: '', color: '#ef4444', buffer: Array(WINDOW_SIZE).fill(0) },
     PPG_RED: { type: 'PPG_RED', label: 'PPG-Red', value: 0, unit: '', color: '#dc2626', buffer: Array(WINDOW_SIZE).fill(0) },
     PPG_GREEN: { type: 'PPG_GREEN', label: 'PPG-Green', value: 0, unit: '', color: '#10b981', buffer: Array(WINDOW_SIZE).fill(0) },
-    EDA: { type: 'EDA', label: 'EDA', value: 0, unit: 'µS', color: '#3b82f6', buffer: Array(WINDOW_SIZE).fill(0) },
-    GYRO_X: { type: 'GYRO_X', label: 'Gyro-X', value: 0, unit: 'mdps', color: '#8b5cf6', buffer: Array(WINDOW_SIZE).fill(0) },
-    GYRO_Y: { type: 'GYRO_Y', label: 'Gyro-Y', value: 0, unit: 'mdps', color: '#a855f7', buffer: Array(WINDOW_SIZE).fill(0) },
-    GYRO_Z: { type: 'GYRO_Z', label: 'Gyro-Z', value: 0, unit: 'mdps', color: '#c084fc', buffer: Array(WINDOW_SIZE).fill(0) },
-    ACC_X: { type: 'ACC_X', label: 'Accel-X', value: 0, unit: 'mg', color: '#06b6d4', buffer: Array(WINDOW_SIZE).fill(0) },
-    ACC_Y: { type: 'ACC_Y', label: 'Accel-Y', value: 0, unit: 'mg', color: '#0891b2', buffer: Array(WINDOW_SIZE).fill(0) },
-    ACC_Z: { type: 'ACC_Z', label: 'Accel-Z', value: 0, unit: 'mg', color: '#0e7490', buffer: Array(WINDOW_SIZE).fill(0) },
-    TEMP: { type: 'TEMP', label: 'Temperature', value: 0, unit: '°C', color: '#f59e0b', buffer: Array(WINDOW_SIZE).fill(0) },
+    EDA: { type: 'EDA', label: 'EDA', value: 0, unit: 'µS', color: '#d97706', buffer: Array(WINDOW_SIZE).fill(0) },
+    GYRO_X: { type: 'GYRO_X', label: 'Gyro-X', value: 0, unit: 'dps', color: '#8b5cf6', buffer: Array(WINDOW_SIZE).fill(0) },
+    GYRO_Y: { type: 'GYRO_Y', label: 'Gyro-Y', value: 0, unit: 'dps', color: '#a855f7', buffer: Array(WINDOW_SIZE).fill(0) },
+    GYRO_Z: { type: 'GYRO_Z', label: 'Gyro-Z', value: 0, unit: 'dps', color: '#c084fc', buffer: Array(WINDOW_SIZE).fill(0) },
+    ACC_X: { type: 'ACC_X', label: 'Accel-X', value: 0, unit: 'g', color: '#06b6d4', buffer: Array(WINDOW_SIZE).fill(0) },
+    ACC_Y: { type: 'ACC_Y', label: 'Accel-Y', value: 0, unit: 'g', color: '#0891b2', buffer: Array(WINDOW_SIZE).fill(0) },
+    ACC_Z: { type: 'ACC_Z', label: 'Accel-Z', value: 0, unit: 'g', color: '#0e7490', buffer: Array(WINDOW_SIZE).fill(0) },
+    TEMP: { type: 'TEMP', label: 'Temperature', value: 0, unit: '°C', color: '#e11d48', buffer: Array(WINDOW_SIZE).fill(0) },
   });
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -174,58 +174,54 @@ export const WristbandSensorsPanel: React.FC = () => {
     }
   }, [sensors, enableFirebaseLogging, user, connectedDeviceName]);
 
-  // Sync real BLE sensor data into the display buffers whenever live state changes.
-  // Does NOT require isStreaming so values are always visible when connected.
+  // Sync the exact compact-stream arrays into the graphs. This avoids
+  // resampling/duplicating values at the React render cadence.
   useEffect(() => {
-    if (useSyntheticData) return;
+    if (!isStreaming || useSyntheticData) return;
+
+    const last10Seconds = (timestamps: number[], values: number[]): number[] => {
+      if (!values.length) return [];
+      if (!timestamps.length || timestamps.length !== values.length) return values.slice(-WINDOW_SIZE);
+      const end = timestamps[timestamps.length - 1];
+      const startIndex = Math.max(0, timestamps.findIndex(t => t >= end - 10_000));
+      return values.slice(startIndex);
+    };
 
     setSensors(prev => {
       const updated = { ...prev };
 
-      // Temperature (AS6221)
-      if (live.temperature.lastUpdated) {
-        const temp = sanitizeSensorValue(live.temperature.tempC, -40, 125);
-        updated.TEMP = {
-          ...updated.TEMP,
-          value: temp,
-          buffer: [...updated.TEMP.buffer.slice(1), temp],
-        };
+      if (live.temperatureStream.values_c.length) {
+        const values = last10Seconds(live.temperatureStream.timestamps, live.temperatureStream.values_c);
+        const value = values[values.length - 1] ?? live.temperature.tempC;
+        updated.TEMP = { ...updated.TEMP, value, buffer: values };
       }
 
-      // PPG (MAX30101)
       if (live.ppg.lastUpdated) {
-        const ir = 0;
-        const red = 0;
         const green = sanitizeSensorValue(live.ppg.green, 0, 400000);
-        updated.PPG_IR = { ...updated.PPG_IR, value: ir, buffer: [...updated.PPG_IR.buffer.slice(1), ir] };
-        updated.PPG_RED = { ...updated.PPG_RED, value: red, buffer: [...updated.PPG_RED.buffer.slice(1), red] };
         updated.PPG_GREEN = { ...updated.PPG_GREEN, value: green, buffer: [...updated.PPG_GREEN.buffer.slice(1), green] };
+        updated.PPG_IR = { ...updated.PPG_IR, value: live.ppg.ir };
+        updated.PPG_RED = { ...updated.PPG_RED, value: live.ppg.red };
       }
 
-      // Accelerometer (LSM6DSO) — in mg
-      if (live.accel.lastUpdated) {
-        const ax = sanitizeSensorValue(live.accel.x, -16000, 16000);
-        const ay = sanitizeSensorValue(live.accel.y, -16000, 16000);
-        const az = sanitizeSensorValue(live.accel.z, -16000, 16000);
-        updated.ACC_X = { ...updated.ACC_X, value: ax, buffer: [...updated.ACC_X.buffer.slice(1), ax] };
-        updated.ACC_Y = { ...updated.ACC_Y, value: ay, buffer: [...updated.ACC_Y.buffer.slice(1), ay] };
-        updated.ACC_Z = { ...updated.ACC_Z, value: az, buffer: [...updated.ACC_Z.buffer.slice(1), az] };
+      const imu = live.imuStream;
+      if (imu.timestamps.length) {
+        const ax = last10Seconds(imu.timestamps, imu.ax_g);
+        const ay = last10Seconds(imu.timestamps, imu.ay_g);
+        const az = last10Seconds(imu.timestamps, imu.az_g);
+        const gx = last10Seconds(imu.timestamps, imu.gx_dps);
+        const gy = last10Seconds(imu.timestamps, imu.gy_dps);
+        const gz = last10Seconds(imu.timestamps, imu.gz_dps);
+        updated.ACC_X = { ...updated.ACC_X, value: ax[ax.length - 1] ?? 0, buffer: ax };
+        updated.ACC_Y = { ...updated.ACC_Y, value: ay[ay.length - 1] ?? 0, buffer: ay };
+        updated.ACC_Z = { ...updated.ACC_Z, value: az[az.length - 1] ?? 0, buffer: az };
+        updated.GYRO_X = { ...updated.GYRO_X, value: gx[gx.length - 1] ?? 0, buffer: gx };
+        updated.GYRO_Y = { ...updated.GYRO_Y, value: gy[gy.length - 1] ?? 0, buffer: gy };
+        updated.GYRO_Z = { ...updated.GYRO_Z, value: gz[gz.length - 1] ?? 0, buffer: gz };
       }
 
-      // Gyroscope (LSM6DSO) — in mdps
-      if (live.gyro.lastUpdated) {
-        const gx = sanitizeSensorValue(live.gyro.x, -300000, 300000);
-        const gy = sanitizeSensorValue(live.gyro.y, -300000, 300000);
-        const gz = sanitizeSensorValue(live.gyro.z, -300000, 300000);
-        updated.GYRO_X = { ...updated.GYRO_X, value: gx, buffer: [...updated.GYRO_X.buffer.slice(1), gx] };
-        updated.GYRO_Y = { ...updated.GYRO_Y, value: gy, buffer: [...updated.GYRO_Y.buffer.slice(1), gy] };
-        updated.GYRO_Z = { ...updated.GYRO_Z, value: gz, buffer: [...updated.GYRO_Z.buffer.slice(1), gz] };
-      }
-
-      // EDA (ADS1113)
-      if (live.eda.lastUpdated) {
-        const cond = sanitizeSensorValue(live.eda.conductance_uS, 0, 200);
-        updated.EDA = { ...updated.EDA, value: cond, buffer: [...updated.EDA.buffer.slice(1), cond] };
+      if (live.edaStream.values_uS.length) {
+        const values = last10Seconds(live.edaStream.timestamps, live.edaStream.values_uS);
+        updated.EDA = { ...updated.EDA, value: values[values.length - 1] ?? 0, buffer: values };
       }
 
       return updated;
@@ -307,32 +303,41 @@ export const WristbandSensorsPanel: React.FC = () => {
     };
   };
 
-  // Create chart data for Acc & Gyro (6 axes)
-  const createAccGyroChartData = () => {
-    const accGyroTypes: SensorType[] = ['GYRO_X', 'GYRO_Y', 'GYRO_Z', 'ACC_X', 'ACC_Y', 'ACC_Z'];
+  const createMultiAxisChartData = (types: SensorType[]) => {
+    const axisColours = ['#ef4444', '#22c55e', '#3b82f6']; // same X/Y/Z colours as PC GUI
+    const filteredAxes = types.map(type => sensors[type].buffer); // direct compact I values; no phone-side filtering
+    const maxLength = Math.max(2, ...filteredAxes.map(values => values.length));
+    const isAccel = types[0]?.startsWith('ACC_');
+    const magnitude = Array.from({ length: maxLength }, (_, index) =>
+      Math.sqrt(filteredAxes.reduce((sum, values) => sum + Math.pow(values[index] ?? 0, 2), 0)),
+    );
+
     return {
-      labels: Array(WINDOW_SIZE).fill(''),
-      datasets: accGyroTypes.map((type) => {
-        const sensor = sensors[type];
-        const filteredData = getFilteredData(sensor.buffer);
-        return {
-          data: filteredData.length > 0 ? filteredData : [0],
-          color: (opacity = 1) => sensor.color,
-          strokeWidth: 1.5,
-        };
-      }),
-      legend: accGyroTypes.map((type) => sensors[type].label),
+      labels: Array(maxLength).fill(''),
+      datasets: [
+        ...types.map((type, index) => ({
+          data: filteredAxes[index].length > 0 ? filteredAxes[index] : [0],
+          color: () => axisColours[index] ?? sensors[type].color,
+          strokeWidth: 1.7,
+        })),
+        {
+          data: magnitude,
+          color: () => '#111827',
+          strokeWidth: 1.4,
+        },
+      ],
+      legend: ['X', 'Y', 'Z', isAccel ? '|a|' : '|gyro|'],
     };
   };
 
   // Create chart data for EDA
   const createEDAChartData = () => {
     const sensor = sensors.EDA;
-    const filteredData = getFilteredData(sensor.buffer);
+    const directData = sensor.buffer; // direct compact E values
     return {
-      labels: Array(WINDOW_SIZE).fill(''),
+      labels: Array(Math.max(directData.length, 2)).fill(''),
       datasets: [{
-        data: filteredData.length > 0 ? filteredData : [0],
+        data: directData.length > 0 ? directData : [0],
         color: (opacity = 1) => sensor.color,
         strokeWidth: 2.5,
       }],
@@ -342,11 +347,11 @@ export const WristbandSensorsPanel: React.FC = () => {
   // Create chart data for Temperature
   const createTempChartData = () => {
     const sensor = sensors.TEMP;
-    const filteredData = getFilteredData(sensor.buffer);
+    const directData = sensor.buffer; // direct compact T values
     return {
-      labels: Array(WINDOW_SIZE).fill(''),
+      labels: Array(Math.max(directData.length, 2)).fill(''),
       datasets: [{
-        data: filteredData.length > 0 ? filteredData : [0],
+        data: directData.length > 0 ? directData : [0],
         color: (opacity = 1) => sensor.color,
         strokeWidth: 2.5,
       }],
@@ -367,9 +372,13 @@ export const WristbandSensorsPanel: React.FC = () => {
         {sensorTypes.map((sensorType) => {
           const sensor = sensors[sensorType];
 
-          // Format IMU values as integers (0 decimals), others with appropriate precision
-          const isIMUData = sensorType.startsWith('GYRO_') || sensorType.startsWith('ACC_');
-          const decimals = isIMUData ? 0 : 5;
+          const decimals = sensorType.startsWith('ACC_')
+            ? 3
+            : sensorType.startsWith('GYRO_')
+              ? 2
+              : sensorType === 'TEMP'
+                ? 2
+                : 3;
 
           return (
             <View
@@ -463,9 +472,12 @@ export const WristbandSensorsPanel: React.FC = () => {
           ❤️  Heart Rate &amp; PPG — Medical-Wristband-Firmware
         </Text>
         <PPGWaveformCard
-          filtSamples={live.ppgStream.filt}
-          thSamples={live.ppgStream.th}
+          cleanSamples={live.ppgStream.filt}
+          timestamps={live.ppgStream.timestamps}
           peakFlags={live.ppgStream.peaks}
+          qualityFlags={live.ppgStream.qualityFlags}
+          artifactFlags={live.ppgStream.artifactFlags}
+          contactFlags={live.ppgStream.contactFlags}
           hrBpm={live.heartRate.bpm}
           confidence={live.heartRate.confidence}
           sqi={live.ppgQuality.sqi}
@@ -473,6 +485,12 @@ export const WristbandSensorsPanel: React.FC = () => {
           qualityOk={live.ppgQuality.qualityOk}
           wearDetected={live.ppgQuality.wearDetected}
           ibi_ms={live.heartRate.ibi_ms}
+          fsHz={live.ppgStream.fsHz}
+          acdc={live.ppgStream.acdc}
+          hrQuality={live.ppgStream.hrQuality}
+          rmssdMs={live.ppgStream.rmssdMs}
+          prvReady={live.ppgStream.prvReady}
+          ibiCv={live.ppgStream.ibiCv}
         />
       </View>
 
@@ -535,58 +553,87 @@ export const WristbandSensorsPanel: React.FC = () => {
         </View>
       </View>
 
-      {/* Accelerometer & Gyroscope Graph */}
+      {/* Accelerometer graph — exact compact I values in g */}
       <View style={styles.waveformCard}>
         <View style={styles.waveformHeader}>
-          <Text style={styles.waveformTitle}>📊 Acc & Gyro</Text>
-          <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' :
-              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-                `BP ${bandPassLow}-${bandPassHigh}Hz`}
-          </Text>
+          <Text style={styles.waveformTitle}>📊 Accelerometer X / Y / Z</Text>
+          <Text style={styles.filterBadge}>g · compact I</Text>
         </View>
-
         <View style={styles.chartContainer}>
           <LineChart
-            data={createAccGyroChartData()}
+            data={createMultiAxisChartData(['ACC_X', 'ACC_Y', 'ACC_Z'])}
             width={screenWidth - 48}
             height={220}
             chartConfig={{
-              backgroundColor: '#8b5cf6',
-              backgroundGradientFrom: '#8b5cf6',
-              backgroundGradientTo: '#7c3aed',
-              decimalPlaces: 1,
-              color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
-              labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
+              backgroundColor: '#f8fafc',
+              backgroundGradientFrom: '#ffffff',
+              backgroundGradientTo: '#f8fafc',
+              decimalPlaces: 3,
+              color: (opacity = 1) => `rgba(15, 23, 42, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(51, 65, 85, ${opacity})`,
               style: { borderRadius: 16 },
               propsForDots: { r: '0' },
-              propsForBackgroundLines: {
-                strokeDasharray: '',
-                stroke: 'rgba(255, 255, 255, 0.15)',
-                strokeWidth: 1,
-              },
+              propsForBackgroundLines: { strokeDasharray: '', stroke: 'rgba(148, 163, 184, 0.28)', strokeWidth: 1 },
             }}
             bezier={false}
             style={styles.chart}
-            withInnerLines={true}
+            withInnerLines
             withOuterLines={false}
             withVerticalLabels={false}
-            withHorizontalLabels={true}
+            withHorizontalLabels
             fromZero={false}
             segments={4}
           />
         </View>
-
         <View style={styles.legendContainer}>
-          {imuSensors.map((sensorType) => {
-            const sensor = sensors[sensorType];
-            return (
-              <View key={sensorType} style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: sensor.color }]} />
-                <Text style={styles.legendText}>{sensor.label}</Text>
-              </View>
-            );
-          })}
+          {[['ax', '#ef4444'], ['ay', '#22c55e'], ['az', '#3b82f6'], ['|a|', '#111827']].map(([label, color]) => (
+            <View key={label} style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: color }]} />
+              <Text style={styles.legendText}>{label}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+
+      {/* Gyroscope graph — exact compact I values in dps */}
+      <View style={styles.waveformCard}>
+        <View style={styles.waveformHeader}>
+          <Text style={styles.waveformTitle}>📊 Gyroscope X / Y / Z</Text>
+          <Text style={styles.filterBadge}>dps · compact I</Text>
+        </View>
+        <View style={styles.chartContainer}>
+          <LineChart
+            data={createMultiAxisChartData(['GYRO_X', 'GYRO_Y', 'GYRO_Z'])}
+            width={screenWidth - 48}
+            height={220}
+            chartConfig={{
+              backgroundColor: '#f8fafc',
+              backgroundGradientFrom: '#ffffff',
+              backgroundGradientTo: '#f8fafc',
+              decimalPlaces: 2,
+              color: (opacity = 1) => `rgba(15, 23, 42, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(51, 65, 85, ${opacity})`,
+              style: { borderRadius: 16 },
+              propsForDots: { r: '0' },
+              propsForBackgroundLines: { strokeDasharray: '', stroke: 'rgba(148, 163, 184, 0.28)', strokeWidth: 1 },
+            }}
+            bezier={false}
+            style={styles.chart}
+            withInnerLines
+            withOuterLines={false}
+            withVerticalLabels={false}
+            withHorizontalLabels
+            fromZero={false}
+            segments={4}
+          />
+        </View>
+        <View style={styles.legendContainer}>
+          {[['gx', '#ef4444'], ['gy', '#22c55e'], ['gz', '#3b82f6'], ['|gyro|', '#111827']].map(([label, color]) => (
+            <View key={label} style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: color }]} />
+              <Text style={styles.legendText}>{label}</Text>
+            </View>
+          ))}
         </View>
       </View>
 
@@ -594,11 +641,7 @@ export const WristbandSensorsPanel: React.FC = () => {
       <View style={styles.waveformCard}>
         <View style={styles.waveformHeader}>
           <Text style={styles.waveformTitle}>📊 EDA</Text>
-          <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' :
-              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-                `BP ${bandPassLow}-${bandPassHigh}Hz`}
-          </Text>
+          <Text style={styles.filterBadge}>µS · compact E</Text>
         </View>
 
         <View style={styles.chartContainer}>
@@ -607,9 +650,9 @@ export const WristbandSensorsPanel: React.FC = () => {
             width={screenWidth - 48}
             height={220}
             chartConfig={{
-              backgroundColor: '#3b82f6',
-              backgroundGradientFrom: '#3b82f6',
-              backgroundGradientTo: '#2563eb',
+              backgroundColor: '#d97706',
+              backgroundGradientFrom: '#d97706',
+              backgroundGradientTo: '#b45309',
               decimalPlaces: 1,
               color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
               labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
@@ -642,13 +685,13 @@ export const WristbandSensorsPanel: React.FC = () => {
           <View style={styles.stat}>
             <Text style={styles.statLabel}>Max</Text>
             <Text style={[styles.statValue, { color: sensors.EDA.color }]}>
-              {Math.max(...getFilteredData(sensors.EDA.buffer)).toFixed(2)}
+              {Math.max(...sensors.EDA.buffer).toFixed(2)}
             </Text>
           </View>
           <View style={styles.stat}>
             <Text style={styles.statLabel}>Min</Text>
             <Text style={[styles.statValue, { color: sensors.EDA.color }]}>
-              {Math.min(...getFilteredData(sensors.EDA.buffer)).toFixed(2)}
+              {Math.min(...sensors.EDA.buffer).toFixed(2)}
             </Text>
           </View>
         </View>
@@ -658,11 +701,7 @@ export const WristbandSensorsPanel: React.FC = () => {
       <View style={styles.waveformCard}>
         <View style={styles.waveformHeader}>
           <Text style={styles.waveformTitle}>📊 Temp</Text>
-          <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' :
-              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-                `BP ${bandPassLow}-${bandPassHigh}Hz`}
-          </Text>
+          <Text style={styles.filterBadge}>°C · compact T</Text>
         </View>
 
         <View style={styles.chartContainer}>
@@ -671,9 +710,9 @@ export const WristbandSensorsPanel: React.FC = () => {
             width={screenWidth - 48}
             height={220}
             chartConfig={{
-              backgroundColor: '#f59e0b',
-              backgroundGradientFrom: '#f59e0b',
-              backgroundGradientTo: '#d97706',
+              backgroundColor: '#e11d48',
+              backgroundGradientFrom: '#e11d48',
+              backgroundGradientTo: '#be123c',
               decimalPlaces: 1,
               color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
               labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
@@ -706,15 +745,44 @@ export const WristbandSensorsPanel: React.FC = () => {
           <View style={styles.stat}>
             <Text style={styles.statLabel}>Max</Text>
             <Text style={[styles.statValue, { color: sensors.TEMP.color }]}>
-              {Math.max(...getFilteredData(sensors.TEMP.buffer)).toFixed(2)}
+              {Math.max(...sensors.TEMP.buffer).toFixed(2)}
             </Text>
           </View>
           <View style={styles.stat}>
             <Text style={styles.statLabel}>Min</Text>
             <Text style={[styles.statValue, { color: sensors.TEMP.color }]}>
-              {Math.min(...getFilteredData(sensors.TEMP.buffer)).toFixed(2)}
+              {Math.min(...sensors.TEMP.buffer).toFixed(2)}
             </Text>
           </View>
+        </View>
+      </View>
+
+      {/* Latest compact M 60-second summary — same fields as the PC GUI */}
+      <View style={styles.minuteSummaryCard}>
+        <Text style={styles.minuteSummaryTitle}>Latest 60-second summary</Text>
+        <View style={styles.minuteSummaryGrid}>
+          {[
+            ['Activity', live.minuteSummary.activity],
+            ['Activity confidence', live.minuteSummary.activityConfidence.toFixed(2)],
+            ['Artifact fraction', live.minuteSummary.artifactFraction.toFixed(2)],
+            ['HR 60s', live.minuteSummary.hrBpm > 0 ? `${live.minuteSummary.hrBpm.toFixed(1)} BPM` : 'NA'],
+            ['HR coverage', `${live.minuteSummary.hrCoverageSec} s`],
+            ['HR quality', live.minuteSummary.hrQuality],
+            ['RMSSD 60s', live.minuteSummary.rmssdMs >= 0 ? `${live.minuteSummary.rmssdMs.toFixed(1)} ms` : 'NA'],
+            ['HRV quality', live.minuteSummary.hrvQuality],
+            ['EDA tonic / SCR', `${live.minuteSummary.edaMuScl.toFixed(3)} / ${live.minuteSummary.edaSigmaScr.toFixed(3)}`],
+            ['EDA quality', `${live.minuteSummary.edaQuality} / ${live.minuteSummary.edaConfidence}`],
+            ['Temperature 60s', live.minuteSummary.tempC >= 0 ? `${live.minuteSummary.tempC.toFixed(2)} °C` : 'NA'],
+            ['Temp quality', live.minuteSummary.tempQuality],
+            ['Temp slope', live.minuteSummary.tempSlope5m >= 0 ? live.minuteSummary.tempSlope5m.toFixed(4) : 'NA'],
+            ['Sleep state', live.minuteSummary.sleepState],
+            ['Sleep confidence', live.minuteSummary.sleepConfidence.toFixed(2)],
+          ].map(([label, value]) => (
+            <View key={label} style={styles.minuteSummaryItem}>
+              <Text style={styles.minuteSummaryLabel}>{label}</Text>
+              <Text style={styles.minuteSummaryValue}>{value}</Text>
+            </View>
+          ))}
         </View>
       </View>
 
@@ -1116,6 +1184,41 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#64748b',
     fontWeight: '600',
+  },
+  minuteSummaryCard: {
+    backgroundColor: '#0f172a',
+    borderRadius: 16,
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 16,
+  },
+  minuteSummaryTitle: {
+    color: '#f8fafc',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 12,
+  },
+  minuteSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  minuteSummaryItem: {
+    borderBottomColor: '#334155',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 7,
+    width: '50%',
+  },
+  minuteSummaryLabel: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  minuteSummaryValue: {
+    color: '#f8fafc',
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 2,
   },
   infoCard: {
     backgroundColor: '#f8fafc',

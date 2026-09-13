@@ -42,3 +42,18 @@ yarn-error.*
 /ios
 /android
 /smartwatch_all_sensors
+
+# Build artifacts
+*.apk
+*.aab
+
+# Crash/debug logs
+apk-crash-*.txt
+*-crash-*.txt
+*.log
+
+# Device/debug information
+phone-info.txt
+
+# Generated documentation dumps
+app_structure.txt

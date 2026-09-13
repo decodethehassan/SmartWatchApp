@@ -243,6 +243,52 @@ export interface StimulationEvent {
 }
 
 // ============================================================================
+// OFFLINE WRISTBAND MINUTE SUMMARY (Algorithm V0 memory sync)
+// ============================================================================
+
+export interface MinuteSummaryReading {
+  /** Reconstructed wall-clock timestamp for the original firmware minute. */
+  timestamp: Timestamp;
+  /** Firmware uptime stored in the original V0_MIN record. */
+  firmwareUptimeMs: number;
+  /** Persistent NAND history index used for resume/deduplication. */
+  historyIndex: number;
+  /** Memory-sync session identifier reported by firmware. */
+  syncSession?: number;
+  /** Protocol version from D,INFO. */
+  memoryProtocolVersion?: number;
+  source: 'WRISTBAND_MEMORY';
+  deviceId?: string;
+  deviceName?: string;
+
+  activity: string;
+  activityConfidence: number;
+  artifactFraction: number;
+
+  heartRate: number;
+  hrCoverageSec: number;
+  hrQuality: string;
+  hrvRmssdMs: number;
+  hrvQuality: string;
+
+  edaMuScl: number;
+  edaSigmaScr: number;
+  edaQuality: string;
+  edaConfidence: string;
+
+  temperatureC: number;
+  temperatureQuality: string;
+  temperatureSlope5m: number;
+
+  sleepState: string;
+  sleepConfidence: number;
+
+  /** App-side metadata for traceability. */
+  syncedAt?: Timestamp;
+  timestampSource?: 'DEVICE_UPTIME_ANCHOR';
+}
+
+// ============================================================================
 // ANALYTICS & AGGREGATIONS
 // ============================================================================
 

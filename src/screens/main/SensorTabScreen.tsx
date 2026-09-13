@@ -296,14 +296,14 @@ export default function SensorTabScreen() {
     const accelTs = live.accel.lastUpdated?.getTime() ?? 0;
     if (accelTs > lastLiveUpdates.current.accel) {
       lastLiveUpdates.current.accel = accelTs;
-      pushSample('accel', live.accel.magnitude);
+      pushSample('accel', live.accel.magnitude / 1000);
     }
 
     // Gyro (magnitude)
     const gyroTs = live.gyro.lastUpdated?.getTime() ?? 0;
     if (gyroTs > lastLiveUpdates.current.gyro) {
       lastLiveUpdates.current.gyro = gyroTs;
-      pushSample('gyro', live.gyro.magnitude);
+      pushSample('gyro', live.gyro.magnitude / 1000);
     }
 
     // Temp

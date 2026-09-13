@@ -19,6 +19,7 @@ import {
   matchesPreferredDeviceName,
   LOG_SERVICE_UUID,
   LOG_NOTIFY_UUID,
+  LOG_COMMAND_UUID,
   NRF_LOG_PROTOCOL,
   ESP_SIGNAL_CTRL_PROTOCOL,
 } from './BLEProtocols';
@@ -693,6 +694,51 @@ class BLEService {
     if (this.disconnectSubscription) {
       try { this.disconnectSubscription.remove(); } catch { }
       this.disconnectSubscription = null;
+    }
+  }
+
+  /**
+   * Send a command directly to the SMARTWATCH Zephyr log-service command
+   * characteristic. This is intentionally independent of currentProtocol so
+   * memory sync still works if the watch was discovered through NUS while the
+   * log service is being used as a secondary notification channel.
+   */
+  async sendLogServiceCommand(data: string, withResponse: boolean = true): Promise<boolean> {
+    if (!this.connectedDevice) {
+      this.handleError('No device connected');
+      return false;
+    }
+
+    try {
+      const encodedData = base64.encode(data);
+      if (withResponse) {
+        try {
+          await this.connectedDevice.writeCharacteristicWithResponseForService(
+            LOG_SERVICE_UUID,
+            LOG_COMMAND_UUID,
+            encodedData
+          );
+        } catch (writeError: any) {
+          console.warn('[BLE] Log command writeWithResponse failed, retrying without response...', writeError?.message);
+          await this.connectedDevice.writeCharacteristicWithoutResponseForService(
+            LOG_SERVICE_UUID,
+            LOG_COMMAND_UUID,
+            encodedData
+          );
+        }
+      } else {
+        await this.connectedDevice.writeCharacteristicWithoutResponseForService(
+          LOG_SERVICE_UUID,
+          LOG_COMMAND_UUID,
+          encodedData
+        );
+      }
+      console.log('[BLE] ✓ Log-service command sent:', data.trim());
+      return true;
+    } catch (error: any) {
+      console.error('[BLE] Failed to send log-service command:', error);
+      this.handleError(`Failed to send wristband command: ${error?.message || error}`);
+      return false;
     }
   }
 

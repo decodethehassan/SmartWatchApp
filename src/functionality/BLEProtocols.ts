@@ -23,15 +23,17 @@ export interface BLEProtocol {
 // CONFIG_BT_DEVICE_NAME = "SMARTWATCH" (prj.conf)
 // Service UUID  : 9f7b0000-6c35-4d2c-9c85-4a8c1a2b3c4d  (ble_log_service.c)
 // Notify char   : 9f7b0001-6c35-4d2c-9c85-4a8c1a2b3c4d
+// Command char  : 9f7b0002-6c35-4d2c-9c85-4a8c1a2b3c4d
 export const LOG_SERVICE_UUID = '9f7b0000-6c35-4d2c-9c85-4a8c1a2b3c4d';
 export const LOG_NOTIFY_UUID  = '9f7b0001-6c35-4d2c-9c85-4a8c1a2b3c4d';
+export const LOG_COMMAND_UUID = '9f7b0002-6c35-4d2c-9c85-4a8c1a2b3c4d';
 
 export const NRF_LOG_PROTOCOL: BLEProtocol = {
   name: 'nRF Sensor Log Service',
   type: BLEProtocolType.NRF_LOG_SERVICE,
   serviceUUID:        LOG_SERVICE_UUID,
-  rxCharUUID:         LOG_NOTIFY_UUID, // device is receive-only; placeholder
-  txCharUUID:         LOG_NOTIFY_UUID, // notify characteristic
+  rxCharUUID:         LOG_COMMAND_UUID, // writable command characteristic (MEM_INFO / MEM_SYNC_*)
+  txCharUUID:         LOG_NOTIFY_UUID,  // notify characteristic
   preferredDeviceName: 'SMARTWATCH',
 };
 

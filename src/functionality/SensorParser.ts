@@ -20,6 +20,9 @@ export interface TemperatureParsed {
   tempC: number;
   rawADC: number;
   uptimeMs: number;
+  /** Firmware sample-quality flag when supplied by compact T records. */
+  qualityOk?: boolean;
+  source?: 'compact' | 'legacy';
 }
 
 export interface PPGParsed {
@@ -63,6 +66,14 @@ export interface IMUCombinedParsed {
   gy_mdps: number;
   gz_mdps: number;
   uptimeMs: number;
+  /** Exact compact-stream units used by the desktop GUI. */
+  ax_g?: number;
+  ay_g?: number;
+  az_g?: number;
+  gx_dps?: number;
+  gy_dps?: number;
+  gz_dps?: number;
+  source?: 'compact' | 'legacy';
 }
 
 export interface EDAParsed {
@@ -75,6 +86,9 @@ export interface EDAParsed {
   uS?: number;
   deltaRaw: number;
   flatCount: number;
+  /** Firmware sample-quality flag when supplied by compact E records. */
+  qualityOk?: boolean;
+  source?: 'compact' | 'legacy';
 }
 
 /**
@@ -100,6 +114,8 @@ export interface PPGStreamParsed {
   green: number;
   /** Firmware-filtered PPG waveform value (baseline-removed, high-passed) */
   filt: number;
+  /** Exact compact C clean waveform value. Equals filt for compact records. */
+  clean: number;
   /** Adaptive peak detection threshold */
   th: number;
   /** True if this sample is an accepted beat peak */
@@ -118,6 +134,19 @@ export interface PPGStreamParsed {
   artifact: boolean;
   /** True if sensor still settling after placement */
   settling: boolean;
+  /** True when the firmware reports a contact/placement artifact. */
+  contactArtifact: boolean;
+  /** Optical AC/DC ratio transmitted by the compact firmware stream. */
+  acdc: number;
+  /** Live firmware HR-quality level: 0 bad, 3 best. */
+  hr_quality: number;
+  /** Live firmware RMSSD in ms, -1 while unavailable. */
+  rmssd_ms: number;
+  /** Firmware PRV readiness flag. */
+  prv_ready: boolean;
+  /** Coefficient of variation for accepted IBI values. */
+  ibi_cv: number;
+  source: 'compact' | 'legacy';
 }
 
 /**
@@ -166,8 +195,11 @@ export interface V0MinParsed {
   hrv_quality: string;
   eda_muSCL: number;
   eda_sigmaSCR: number;
+  eda_quality: string;
+  eda_confidence: string;
   temp_c: number;
   temp_quality: string;
+  temp_slope_5m: number;
   /** Sleep state: SLEEP | WAKE */
   sleep_state: string;
   sleep_conf: number;
@@ -735,6 +767,169 @@ function getStr(kv: Record<string, number | string>, ...keys: string[]): string 
   return '';
 }
 
+function csvNumber(parts: string[], index: number, fallback = 0): number {
+  if (index >= parts.length) return fallback;
+  const value = Number(parts[index]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * Compact production stream used by ppg_web_gui_hrv_stage.html.
+ *
+ * C,t_ms,seq,green,clean,peak,qok,artifact,contact,hr,fs,sqi,acdc,
+ *   ibi,hrq,rmssd,prv,cv
+ */
+export function parseCompactPPG(line: string): PPGStreamParsed | null {
+  try {
+    const parts = line.trim().split(',');
+    if (parts[0]?.toUpperCase() !== 'C' || parts.length < 13) return null;
+
+    const t_ms = csvNumber(parts, 1, Number.NaN);
+    const clean = csvNumber(parts, 4, Number.NaN);
+    if (!Number.isFinite(t_ms) || !Number.isFinite(clean)) return null;
+
+    const green = csvNumber(parts, 3, 0);
+    return {
+      type: 'ppg_stream',
+      t_ms,
+      seq: csvNumber(parts, 2, 0),
+      raw: green,
+      green,
+      filt: clean,
+      clean,
+      th: Number.NaN,
+      peak: csvNumber(parts, 5, 0) !== 0,
+      qok: csvNumber(parts, 6, 0) !== 0,
+      artifact: csvNumber(parts, 7, 1) !== 0,
+      contactArtifact: csvNumber(parts, 8, 1) !== 0,
+      hr: csvNumber(parts, 9, -1),
+      fs: csvNumber(parts, 10, -1),
+      sqi: csvNumber(parts, 11, -1),
+      acdc: csvNumber(parts, 12, Number.NaN),
+      ibi_ms: csvNumber(parts, 13, 0),
+      hr_quality: csvNumber(parts, 14, 0),
+      rmssd_ms: csvNumber(parts, 15, -1),
+      prv_ready: csvNumber(parts, 16, 0) !== 0,
+      ibi_cv: csvNumber(parts, 17, -1),
+      settling: false,
+      source: 'compact',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** I,t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps */
+export function parseCompactIMU(line: string): IMUCombinedParsed | null {
+  try {
+    const parts = line.trim().split(',');
+    if (parts[0]?.toUpperCase() !== 'I' || parts.length < 8) return null;
+    const values = parts.slice(1, 8).map(Number);
+    if (!values.every(Number.isFinite)) return null;
+    const [uptimeMs, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps] = values;
+    return {
+      type: 'imu_combined',
+      uptimeMs,
+      ax_mg: ax_g * 1000,
+      ay_mg: ay_g * 1000,
+      az_mg: az_g * 1000,
+      gx_mdps: gx_dps * 1000,
+      gy_mdps: gy_dps * 1000,
+      gz_mdps: gz_dps * 1000,
+      ax_g,
+      ay_g,
+      az_g,
+      gx_dps,
+      gy_dps,
+      gz_dps,
+      source: 'compact',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** E,t_ms,eda_uS,quality */
+export function parseCompactEDA(line: string): EDAParsed | null {
+  try {
+    const parts = line.trim().split(',');
+    if (parts[0]?.toUpperCase() !== 'E' || parts.length < 4) return null;
+    const uptimeMs = csvNumber(parts, 1, Number.NaN);
+    const uS = csvNumber(parts, 2, Number.NaN);
+    if (!Number.isFinite(uptimeMs) || !Number.isFinite(uS)) return null;
+    return {
+      type: 'eda',
+      uptimeMs,
+      rawADC: 0,
+      mv: 0,
+      uS,
+      deltaRaw: 0,
+      flatCount: 0,
+      qualityOk: csvNumber(parts, 3, 0) !== 0,
+      source: 'compact',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** T,t_ms,temp_c,quality */
+export function parseCompactTemperature(line: string): TemperatureParsed | null {
+  try {
+    const parts = line.trim().split(',');
+    if (parts[0]?.toUpperCase() !== 'T' || parts.length < 4) return null;
+    const uptimeMs = csvNumber(parts, 1, Number.NaN);
+    const tempC = csvNumber(parts, 2, Number.NaN);
+    if (!Number.isFinite(uptimeMs) || !Number.isFinite(tempC)) return null;
+    return {
+      type: 'temperature',
+      tempC,
+      rawADC: Math.round(tempC * 100),
+      uptimeMs,
+      qualityOk: csvNumber(parts, 3, 0) !== 0,
+      source: 'compact',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * M,t_ms,activity,act_conf,art_frac,hr,hr_cov,hr_q,rmssd,hrv_q,
+ *   eda_mu,eda_scr,eda_q,eda_conf,temp,temp_q,temp_slope,sleep,sleep_conf
+ */
+export function parseCompactMinute(line: string): V0MinParsed | null {
+  try {
+    const parts = line.trim().split(',');
+    if (parts[0]?.toUpperCase() !== 'M' || parts.length < 19) return null;
+    const t_ms = csvNumber(parts, 1, Number.NaN);
+    if (!Number.isFinite(t_ms)) return null;
+    return {
+      type: 'v0_min',
+      t_ms,
+      activity: parts[2] || 'NA',
+      act_conf: csvNumber(parts, 3, 0),
+      art_frac: csvNumber(parts, 4, 0),
+      hr_bpm: csvNumber(parts, 5, -1),
+      hr_coverage_sec: csvNumber(parts, 6, 0),
+      hr_quality: parts[7] || 'NA',
+      hrv_rmssd_ms: csvNumber(parts, 8, -1),
+      hrv_quality: parts[9] || 'NA',
+      eda_muSCL: csvNumber(parts, 10, -1),
+      eda_sigmaSCR: csvNumber(parts, 11, -1),
+      eda_quality: parts[12] || 'NA',
+      eda_confidence: parts[13] || 'NA',
+      temp_c: csvNumber(parts, 14, -1),
+      temp_quality: parts[15] || 'NA',
+      temp_slope_5m: csvNumber(parts, 16, -1),
+      sleep_state: parts[17] || 'NA',
+      sleep_conf: csvNumber(parts, 18, 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Parse PPG_STREAM or PV line (per-sample algo output from algo_v0.c).
  *
@@ -762,7 +957,31 @@ export function parsePPGStream(line: string): PPGStreamParsed | null {
     const art   = getNum(kv, 'art', 'artifact') !== 0;
     const settle = getNum(kv, 'settle', 'settling') !== 0;
 
-    return { type: 'ppg_stream', t_ms, seq, raw, green, filt, th, peak, ibi_ms: ibi, hr, fs, qok, sqi, artifact: art, settling: settle };
+    return {
+      type: 'ppg_stream',
+      t_ms,
+      seq,
+      raw,
+      green,
+      filt,
+      clean: filt,
+      th,
+      peak,
+      ibi_ms: ibi,
+      hr,
+      fs,
+      qok,
+      sqi,
+      artifact: art,
+      settling: settle,
+      contactArtifact: settle,
+      acdc: Number.NaN,
+      hr_quality: qok ? 2 : 0,
+      rmssd_ms: -1,
+      prv_ready: false,
+      ibi_cv: -1,
+      source: 'legacy',
+    };
   } catch {
     return null;
   }
@@ -806,6 +1025,8 @@ export function parseV0Min(line: string): V0MinParsed | null {
     const actMatch   = line.match(/ACT=([A-Z_]+)/i);
     const hrqMatch   = line.match(/HR_q=([A-Z_]+)/i);
     const hrvqMatch  = line.match(/HRV_q=([A-Z_]+)/i);
+    const edaqMatch  = line.match(/EDA_q=([A-Z_]+)/i);
+    const edacMatch  = line.match(/EDA_conf=([A-Z_]+)/i);
     const sleepMatch = line.match(/SLEEP=([A-Z_]+)/i);
     const tempqMatch = line.match(/TEMP_q=([A-Z_]+)/i);
 
@@ -822,8 +1043,11 @@ export function parseV0Min(line: string): V0MinParsed | null {
       hrv_quality: hrvqMatch ? hrvqMatch[1] : getStr(kv, 'hrv_q'),
       eda_muSCL: getNum(kv, 'eda_muscl'),
       eda_sigmaSCR: getNum(kv, 'eda_sigmascr'),
+      eda_quality: edaqMatch ? edaqMatch[1] : getStr(kv, 'eda_q'),
+      eda_confidence: edacMatch ? edacMatch[1] : getStr(kv, 'eda_conf'),
       temp_c: getNum(kv, 'temp'),
       temp_quality: tempqMatch ? tempqMatch[1] : getStr(kv, 'temp_q'),
+      temp_slope_5m: getNum(kv, 'temp_slope5m'),
       sleep_state: sleepMatch ? sleepMatch[1] : getStr(kv, 'sleep'),
       sleep_conf: getNum(kv, 'sleep_conf'),
     };
@@ -859,6 +1083,19 @@ export function parseSensorLine(line: string): ParsedSensorReading | null {
 
     const cleanLine = line.trim();
     const upperLine = cleanLine.toUpperCase();
+
+    // Memory-sync records (D,...) are consumed by MemorySyncService. Never let
+    // a stored D,M,...V0_MIN payload enter the live pipeline, otherwise it can
+    // overwrite the current dashboard values and be written as live data.
+    if (upperLine.startsWith('D,')) return null;
+
+    // ── PRIORITY 0: compact production records used by the desktop HTML GUI ──
+    // These records are the only records emitted when BLE_DATA_ONLY_STREAM_ENABLE=1.
+    if (upperLine.startsWith('C,')) return parseCompactPPG(cleanLine);
+    if (upperLine.startsWith('I,')) return parseCompactIMU(cleanLine);
+    if (upperLine.startsWith('E,')) return parseCompactEDA(cleanLine);
+    if (upperLine.startsWith('T,')) return parseCompactTemperature(cleanLine);
+    if (upperLine.startsWith('M,')) return parseCompactMinute(cleanLine);
 
     // ── PRIORITY 1: Firmware algo_v0 BLE stream formats (Medical-Wristband-Firmware) ──
     // These are checked FIRST because they don't use the standard "module:" prefix format.

@@ -34,6 +34,7 @@ import {
   RawSensorLog,
   BatchSensorData,
   AnySensorReading,
+  MinuteSummaryReading,
 } from './sensorTypes';
 
 /**
@@ -117,10 +118,47 @@ const calculateDataQuality = (reading: any): DataQuality => {
  * Remove undefined values from an object before writing to Firestore.
  * Firestore rejects documents that contain undefined field values.
  */
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (value === null || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+/**
+ * Prepare arbitrary application data for Firestore without altering Firestore
+ * sentinel values such as serverTimestamp(), increment(), or Timestamp objects.
+ *
+ * - undefined object fields are removed
+ * - undefined array entries become null (Firestore does not accept undefined)
+ * - NaN and +/-Infinity become null
+ * - plain nested objects and arrays are sanitised recursively
+ * - class instances / Firestore sentinel objects are preserved unchanged
+ */
+const sanitizeForFirestore = (value: any): any => {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && !Number.isFinite(value)) return null;
+  if (value === null || typeof value !== 'object') return value;
+
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const cleaned = sanitizeForFirestore(item);
+      return cleaned === undefined ? null : cleaned;
+    });
+  }
+
+  if (!isPlainObject(value)) {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [key, sanitizeForFirestore(item)])
+  );
+};
+
 const stripUndefined = <T extends object>(obj: T): Partial<T> =>
-  Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined)
-  ) as Partial<T>;
+  sanitizeForFirestore(obj) as Partial<T>;
 
 // ============================================================================
 // FIREBASE WRITE BATCHING SYSTEM
@@ -143,6 +181,7 @@ interface BatchWriteStats {
 // Module-level queue for batching writes
 let firebaseWriteQueue: FirebaseQueuedWrite[] = [];
 let batchProcessorInterval: NodeJS.Timeout | null = null;
+let batchCommitInProgress = false;
 
 /**
  * THROTTLING MECHANISM: Track last write timestamp per sensor type
@@ -192,15 +231,16 @@ export const startFirebaseWriteBatcher = (): void => {
   }
 
   batchProcessorInterval = setInterval(async () => {
-    if (firebaseWriteQueue.length === 0) {
-      return;  // Skip if queue is empty
+    // Avoid overlapping asynchronous commits when the network is slow.
+    if (batchCommitInProgress || firebaseWriteQueue.length === 0) {
+      return;
     }
 
+    batchCommitInProgress = true;
     const queueToProcess = [...firebaseWriteQueue];
-    firebaseWriteQueue = [];  // Clear queue immediately
+    firebaseWriteQueue = [];
 
     try {
-      // Group writes by user for atomic batching
       const writesByUser = new Map<string, FirebaseQueuedWrite[]>();
       for (const write of queueToProcess) {
         if (!writesByUser.has(write.userId)) {
@@ -209,15 +249,12 @@ export const startFirebaseWriteBatcher = (): void => {
         writesByUser.get(write.userId)!.push(write);
       }
 
-      // Process each user's writes atomically
       const stats: BatchWriteStats = {
         totalWrites: 0,
         byType: {},
       };
 
       for (const [userId, writes] of writesByUser) {
-        // CRITICAL: Chunk writes to never exceed 500 operations per batch
-        // Use 450 as max to stay safely under the 500 limit
         const MAX_BATCH_SIZE = 450;
 
         for (let i = 0; i < writes.length; i += MAX_BATCH_SIZE) {
@@ -225,33 +262,50 @@ export const startFirebaseWriteBatcher = (): void => {
           const batch = writeBatch(db);
 
           for (const write of chunk) {
-            const collectionRef = collection(db, 'users', userId, ...write.collectionPath.split('/'));
+            const collectionRef = collection(
+              db,
+              'users',
+              userId,
+              ...write.collectionPath.split('/')
+            );
             const docRef = doc(collectionRef);
-            batch.set(docRef, write.data);
-
-            // Track stats
-            stats.totalWrites++;
-            const sensorType = write.collectionPath.split('/')[1] || 'unknown';
-            stats.byType[sensorType] = (stats.byType[sensorType] || 0) + 1;
+            batch.set(docRef, stripUndefined(write.data));
           }
 
-          await batch.commit();
+          try {
+            await batch.commit();
+
+            stats.totalWrites += chunk.length;
+            for (const write of chunk) {
+              const sensorType = write.collectionPath.split('/')[1] || 'unknown';
+              stats.byType[sensorType] = (stats.byType[sensorType] || 0) + 1;
+            }
+          } catch (error) {
+            // Requeue only the failed chunk. Already committed chunks are not duplicated.
+            firebaseWriteQueue.unshift(...chunk);
+            console.error('[Firebase] ❌ Batch chunk failed and was requeued:', error);
+          }
         }
       }
 
-      // Log batch results once (not per-write)
       const typeBreakdown = Object.entries(stats.byType)
         .map(([type, count]) => `${type}: ${count}`)
         .join(', ');
-      // Batch committed successfully
-    } catch (error) {
-      console.error('[Firebase] ❌ Batch write failed:', error);
-      // Put failed writes back in queue for retry
-      firebaseWriteQueue.unshift(...queueToProcess);
-    }
-  }, 3000);  // Process every 3 seconds
 
-  // Batch processor started
+      if (stats.totalWrites > 0) {
+        console.log(
+          `[Firebase] ✅ Batch committed: ${stats.totalWrites} write(s)` +
+          (typeBreakdown ? ` (${typeBreakdown})` : '')
+        );
+      }
+    } catch (error) {
+      // An unexpected processing failure should not lose queued records.
+      firebaseWriteQueue.unshift(...queueToProcess);
+      console.error('[Firebase] ❌ Batch processor failed; writes requeued:', error);
+    } finally {
+      batchCommitInProgress = false;
+    }
+  }, 3000);
 };
 
 /**
@@ -300,6 +354,13 @@ export const stopDataLogger = (userId?: string): void => {
  * SAFETY: Wrapped in try/catch to prevent Firebase errors from crashing BLE pipeline or UI
  */
 export const flushFirebaseWriteQueue = async (): Promise<void> => {
+  // If the scheduled processor is already committing, wait briefly so shutdown
+  // does not run a second Firestore batch concurrently.
+  const waitStartedAt = Date.now();
+  while (batchCommitInProgress && Date.now() - waitStartedAt < 5000) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+
   console.log('[Teardown Diagnostic] flushFirebaseWriteQueue called. Items in queue:', firebaseWriteQueue.length);
 
   if (!firebaseWriteQueue || firebaseWriteQueue.length === 0) {
@@ -338,17 +399,23 @@ export const flushFirebaseWriteQueue = async (): Promise<void> => {
           for (const write of chunk) {
             const collectionRef = collection(db, 'users', userId, ...write.collectionPath.split('/'));
             const docRef = doc(collectionRef);
-            batch.set(docRef, write.data);
-            totalWrites++;
+            batch.set(docRef, stripUndefined(write.data));
           }
 
           await batch.commit();
+          totalWrites += chunk.length;
           batchCount++;
         } catch (batchError: any) {
-          // Continue processing other batches even if one fails
-          // Don't re-queue — we already cleared the main queue
+          console.error('[Firebase] ❌ Flush batch failed:', batchError);
+          // Continue processing other batches. Shutdown must not hang forever.
         }
       }
+    }
+
+    if (totalWrites > 0) {
+      console.log(
+        `[Firebase] ✅ Flush committed: ${totalWrites} write(s) in ${batchCount} batch(es)`
+      );
     }
   } catch (error: any) {
     // ISOLATION: Catch any top-level errors to prevent Firebase failures from crashing the app
@@ -555,21 +622,30 @@ export const saveHeartRateReading = async (
   data: Omit<HeartRateReading, 'timestamp' | 'sensorType'>
 ): Promise<void> => {
   try {
-    const reading: HeartRateReading = {
-      ...data,
+    const reading = stripUndefined({
+      heartRate: safeNum(data.heartRate) ?? 0,
+      rrInterval: safeNum(data.rrInterval),
+      hrv: safeNum(data.hrv),
+      confidence: safeNum(data.confidence),
+      derivedFrom: data.derivedFrom,
+      deviceId: data.deviceId,
+      deviceName: data.deviceName,
+      sessionId: data.sessionId,
+      metadata: data.metadata ? stripUndefined(data.metadata) : undefined,
+      quality: data.quality ?? calculateDataQuality(data),
       sensorType: SensorType.HEART_RATE,
       timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
-    };
+    }) as HeartRateReading;
 
-    // Queue for batch processing instead of immediate write
+    // Queue for batch processing instead of immediate write.
+    // The object is already sanitised, and the batch layer sanitises again as
+    // a final safety net before Firestore receives it.
     firebaseWriteQueue.push({
       userId,
       collectionPath: 'sensor_data/heart_rate/readings',
       data: reading,
     });
 
-    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'heartRate');
     }
@@ -1364,6 +1440,82 @@ export const saveSensorReadingBatch = async (
   const promises = readings.map(reading => saveSensorReading(userId, reading));
   await Promise.all(promises);
   console.log(`[Firebase] ✅ Saved ${readings.length} sensor readings (legacy batch)`);
+};
+
+// ============================================================================
+// OFFLINE WRISTBAND MINUTE-SUMMARY HISTORY
+// ============================================================================
+
+export interface HistoricalMinuteSummaryInput
+  extends Omit<MinuteSummaryReading, 'timestamp' | 'syncedAt'> {
+  timestampMs: number;
+}
+
+const minuteSummaryDocId = (record: HistoricalMinuteSummaryInput): string => {
+  const device = (record.deviceId || 'wristband').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
+  // Stable across retries/resume: the same NAND history index + firmware uptime
+  // resolves to the same Firestore document instead of creating duplicates.
+  return `${device}_${Math.max(0, Math.floor(record.historyIndex))}_${Math.max(0, Math.floor(record.firmwareUptimeMs))}`;
+};
+
+/**
+ * Persist Algorithm V0 minute results downloaded from wristband NAND.
+ * Uses deterministic document IDs and batched set() operations so retries are
+ * idempotent and a reconnect/resume cannot duplicate already-synced minutes.
+ */
+export const saveHistoricalMinuteSummaries = async (
+  userId: string,
+  records: HistoricalMinuteSummaryInput[]
+): Promise<void> => {
+  if (!userId || records.length === 0) return;
+
+  const MAX_BATCH = 400; // comfortably below Firestore's 500-write limit
+  for (let offset = 0; offset < records.length; offset += MAX_BATCH) {
+    const chunk = records.slice(offset, offset + MAX_BATCH);
+    const batch = writeBatch(db);
+
+    for (const record of chunk) {
+      const { timestampMs, ...payload } = record;
+      if (!Number.isFinite(timestampMs) || timestampMs <= 0) continue;
+
+      const ref = doc(
+        db,
+        'users', userId,
+        'sensor_data', 'minute_summaries',
+        'readings', minuteSummaryDocId(record)
+      );
+
+      batch.set(ref, stripUndefined({
+        ...payload,
+        timestamp: Timestamp.fromMillis(timestampMs),
+        syncedAt: serverTimestamp(),
+      }), { merge: true });
+    }
+
+    await batch.commit();
+  }
+};
+
+/** Load stored Algorithm V0 minute summaries for a wall-clock time range. */
+export const getMinuteSummariesForRange = async (
+  userId: string,
+  start: Date,
+  end: Date
+): Promise<Array<MinuteSummaryReading & { id: string }>> => {
+  if (!userId) return [];
+
+  const q = query(
+    collection(db, 'users', userId, 'sensor_data', 'minute_summaries', 'readings'),
+    where('timestamp', '>=', Timestamp.fromDate(start)),
+    where('timestamp', '<=', Timestamp.fromDate(end)),
+    orderBy('timestamp', 'asc')
+  );
+
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({
+    id: d.id,
+    ...(d.data() as MinuteSummaryReading),
+  }));
 };
 
 // ============================================================================
