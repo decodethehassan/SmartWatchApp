@@ -38,7 +38,8 @@
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT"
       ],
-      "package": "com.abrehman.smartstimapp"
+      "package": "com.abrehman.smartstimapp",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -55,7 +56,8 @@
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to your Smart Stim device via Bluetooth."
         }
       ],
-      "expo-font"
+      "expo-font",
+      "@react-native-google-signin/google-signin"
     ],
     "extra": {
       "eas": {

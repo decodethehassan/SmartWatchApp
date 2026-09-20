@@ -3,6 +3,7 @@ import { User, onAuthStateChanged, signOut } from "firebase/auth";
 import { auth } from "../firebase/firebaseConfig";
 import { ensureUserDocument, getUserProfile, UserProfile } from "../firebase/dataLogger";
 import { bleService } from "../functionality/BLEService";
+import { signOutFromGoogle } from "./googleAuth";
 
 type AuthContextType = {
   user: User | null;
@@ -72,6 +73,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } catch (e) {
       // Not fatal - proceed with logout even if disconnect fails
     }
+    // Clear the native Google session too. For email/password users this is a no-op.
+    await signOutFromGoogle();
+
     await signOut(auth);
     setProfile(null);
   };

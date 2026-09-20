@@ -9,7 +9,7 @@ import {
 } from '../firebase/dataLogger';
 
 const BLE_DATA_EVENT = 'BLE_DATA_LINE';
-const META_PREFIX = 'wristband_memory_sync_v1';
+const META_PREFIX = 'wristband_memory_sync_v2';
 
 export type MemorySyncPhase =
   | 'idle'
@@ -57,7 +57,6 @@ interface ResumeMeta {
   lastSyncedIndex: number;
   lastHistoryCount: number;
   lastDeviceUptimeMs: number;
-  bootEpochMs: number;
 }
 
 type StateListener = (state: MemorySyncState) => void;
@@ -90,6 +89,7 @@ class MemorySyncService {
   private pendingRecords: HistoricalMinuteSummaryInput[] = [];
   private persistChain: Promise<void> = Promise.resolve();
   private persistError: Error | null = null;
+  private minuteUnixMs = new Map<number, number>();
   private infoTimeout: ReturnType<typeof setTimeout> | null = null;
   private syncGeneration = 0;
 
@@ -148,7 +148,6 @@ class MemorySyncService {
         lastSyncedIndex: Number(parsed.lastSyncedIndex),
         lastHistoryCount: Number(parsed.lastHistoryCount) || 0,
         lastDeviceUptimeMs: Number(parsed.lastDeviceUptimeMs) || 0,
-        bootEpochMs: Number(parsed.bootEpochMs) || 0,
       };
     } catch (error) {
       console.warn('[MemorySync] Could not read resume metadata:', error);
@@ -168,10 +167,6 @@ class MemorySyncService {
           : previous?.lastSyncedIndex ?? this.state.lastSyncedIndex,
       lastHistoryCount: this.state.info.historyCount,
       lastDeviceUptimeMs: this.state.info.deviceUptimeMs,
-      bootEpochMs:
-        previous?.bootEpochMs && previous.bootEpochMs > 0
-          ? previous.bootEpochMs
-          : Date.now() - this.state.info.deviceUptimeMs,
     };
 
     this.resumeMeta = meta;
@@ -206,12 +201,22 @@ class MemorySyncService {
     this.persistChain = Promise.resolve();
     this.persistError = null;
     this.resumeMeta = null;
+    this.minuteUnixMs.clear();
     this.publish({
       ...initialState,
       phase: 'checking',
-      message: 'Checking wristband memory…',
+      message: 'Synchronizing wristband clock…',
     });
 
+    // Best-effort backup time anchor. BLEContext also sends TIME_SYNC as soon
+    // as the wristband connects, so future minute records have firmware-stored
+    // absolute timestamps even before the user opens this screen.
+    const timeOk = await bleService.sendLogServiceCommand(`TIME_SYNC,${Date.now()}\n`, true);
+    if (!timeOk) {
+      console.warn('[MemorySync] TIME_SYNC failed; exact timestamps will only be available for records already anchored by firmware.');
+    }
+
+    this.publish({ message: 'Checking wristband memory…' });
     const ok = await bleService.sendLogServiceCommand('MEM_INFO\n', true);
     if (!ok) {
       this.publish({
@@ -282,6 +287,10 @@ class MemorySyncService {
       this.handleBegin(line);
       return;
     }
+    if (line.startsWith('D,MT,')) {
+      this.handleMinuteTime(line);
+      return;
+    }
     if (line.startsWith('D,M,')) {
       this.handleMinute(line);
       return;
@@ -339,14 +348,12 @@ class MemorySyncService {
     };
 
     let meta = await this.loadMeta();
-    const nowBootEpoch = Date.now() - info.deviceUptimeMs;
 
     if (!meta) {
       meta = {
         lastSyncedIndex: -1,
         lastHistoryCount: info.historyCount,
         lastDeviceUptimeMs: info.deviceUptimeMs,
-        bootEpochMs: nowBootEpoch,
       };
     } else {
       // A smaller history count means NAND history was reset/reflashed. Start
@@ -355,14 +362,9 @@ class MemorySyncService {
         meta.lastSyncedIndex = -1;
       }
 
-      // Device uptime moving backwards indicates a reboot. New records after
-      // that reboot can still be anchored correctly; Algorithm V0 history from
-      // an earlier boot cannot receive a guaranteed wall-clock time without RTC.
-      if (info.deviceUptimeMs + 5000 < meta.lastDeviceUptimeMs) {
-        meta.bootEpochMs = nowBootEpoch;
-      } else if (!Number.isFinite(meta.bootEpochMs) || meta.bootEpochMs <= 0) {
-        meta.bootEpochMs = nowBootEpoch;
-      }
+      // History indices persist across wristband reboots. We deliberately do
+      // NOT rebuild old timestamps from the current boot's uptime. Exact time
+      // comes only from the firmware D,MT timestamp paired with each record.
     }
 
     meta.lastHistoryCount = info.historyCount;
@@ -422,6 +424,23 @@ class MemorySyncService {
     });
   }
 
+  private handleMinuteTime(line: string): void {
+    const match = line.match(/^D,MT,(\d+),(\d+),(\d+)$/);
+    if (!match) return;
+
+    const historyIndex = finiteInt(match[2]);
+    let unixMs = Number(match[3]);
+    if (!Number.isFinite(unixMs) || unixMs <= 0) return;
+
+    // Firmware now normalizes seconds to milliseconds, but keep this guard for
+    // mixed-version testing.
+    if (unixMs >= 1_000_000_000 && unixMs < 100_000_000_000) {
+      unixMs *= 1000;
+    }
+
+    this.minuteUnixMs.set(historyIndex, Math.floor(unixMs));
+  }
+
   private handleMinute(line: string): void {
     if (!this.context || !this.resumeMeta) return;
 
@@ -437,9 +456,12 @@ class MemorySyncService {
       return;
     }
 
-    const timestampMs = this.resumeMeta.bootEpochMs + vm.t_ms;
+    const exactUnixMs = this.minuteUnixMs.get(historyIndex);
+    this.minuteUnixMs.delete(historyIndex);
+
+    const hasExactTime = Number.isFinite(exactUnixMs) && Number(exactUnixMs) > 0;
     const record: HistoricalMinuteSummaryInput = {
-      timestampMs,
+      timestampMs: hasExactTime ? Number(exactUnixMs) : null,
       firmwareUptimeMs: vm.t_ms,
       historyIndex,
       syncSession: session,
@@ -464,7 +486,7 @@ class MemorySyncService {
       temperatureSlope5m: vm.temp_slope_5m,
       sleepState: vm.sleep_state,
       sleepConfidence: vm.sleep_conf,
-      timestampSource: 'DEVICE_UPTIME_ANCHOR',
+      timestampSource: hasExactTime ? 'FIRMWARE_UNIX_MS' : 'UNAVAILABLE_LEGACY',
     };
 
     this.pendingRecords.push(record);

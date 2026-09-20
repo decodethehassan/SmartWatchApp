@@ -7,9 +7,9 @@ import { useDevMode } from '../functionality/DevModeContext';
 import HomeScreen from '../screens/main/HomeScreen';
 import PhysiologicalInsightScreen from '../screens/main/PhysiologicalInsightScreen';
 import StimulationScreen from '../screens/main/StimulationScreen';
-import SettingsScreen from '../screens/main/SettingsScreen';
 import SensorTabScreen from '../screens/main/SensorTabScreen';
 import PsychologicalStack from './PsychologicalStack';
+import SettingsStack from './SettingsStack';
 
 export type MainTabsParamList = {
   Home: undefined;
@@ -27,7 +27,8 @@ export default function MainTabsNavigator() {
   const { isDevMode } = useDevMode();
 
   return (
-    <Tab.Navigator id="main-tabs-navigator"
+    <Tab.Navigator
+      id="main-tabs-navigator"
       screenOptions={({ route }) => ({
         headerShown: false,
         freezeOnBlur: true,
@@ -37,7 +38,6 @@ export default function MainTabsNavigator() {
           backgroundColor: '#ffffff',
           borderTopColor: '#e5e7eb',
           borderTopWidth: 1,
-          // Keep tabs above Android 3-button navigation bar.
           paddingBottom: Math.max(insets.bottom, 6),
           paddingTop: 4,
           height: 56 + Math.max(insets.bottom, 6),
@@ -65,7 +65,8 @@ export default function MainTabsNavigator() {
 
           return <Ionicons name={iconName} size={size} color={color} />;
         },
-      })}>
+      })}
+    >
       <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
       <Tab.Screen name="Physiological" component={PhysiologicalInsightScreen} options={{ title: 'Physical' }} />
       <Tab.Screen name="Stimulation" component={StimulationScreen} options={{ title: 'Stimulation' }} />
@@ -73,7 +74,7 @@ export default function MainTabsNavigator() {
       {isDevMode && (
         <Tab.Screen name="Sensor" component={SensorTabScreen} options={{ title: 'Sensor' }} />
       )}
-      <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
+      <Tab.Screen name="Settings" component={SettingsStack} options={{ title: 'Settings' }} />
     </Tab.Navigator>
   );
 }

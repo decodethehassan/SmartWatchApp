@@ -39,7 +39,36 @@ export interface BLEDevice {
 
 export type BLEConnectionCallback = (isConnected: boolean, device?: Device) => void;
 export type BLEDataCallback = (data: string) => void;
+export type BLEBinaryCallback = (data: Uint8Array) => void;
 export type BLEErrorCallback = (error: string) => void;
+
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** Decode a BLE characteristic's base64 value into exact bytes without UTF-8 conversion. */
+const base64ToBytes = (value: string): Uint8Array => {
+  const clean = value.replace(/\s+/g, '');
+  if (!clean) return new Uint8Array(0);
+
+  const out: number[] = [];
+  for (let i = 0; i < clean.length; i += 4) {
+    const c0 = BASE64_ALPHABET.indexOf(clean[i] ?? 'A');
+    const c1 = BASE64_ALPHABET.indexOf(clean[i + 1] ?? 'A');
+    const c2ch = clean[i + 2] ?? '=';
+    const c3ch = clean[i + 3] ?? '=';
+    const c2 = c2ch === '=' ? 0 : BASE64_ALPHABET.indexOf(c2ch);
+    const c3 = c3ch === '=' ? 0 : BASE64_ALPHABET.indexOf(c3ch);
+
+    if (c0 < 0 || c1 < 0 || (c2ch !== '=' && c2 < 0) || (c3ch !== '=' && c3 < 0)) {
+      throw new Error('Invalid base64 BLE payload');
+    }
+
+    out.push(((c0 << 2) | (c1 >> 4)) & 0xff);
+    if (c2ch !== '=') out.push((((c1 & 0x0f) << 4) | (c2 >> 2)) & 0xff);
+    if (c3ch !== '=') out.push((((c2 & 0x03) << 6) | c3) & 0xff);
+  }
+
+  return Uint8Array.from(out);
+};
 
 /**
  * Lightweight Event Emitter pattern (replaces RxJS Subject for React Native compatibility)
@@ -86,6 +115,8 @@ class BLEService {
   private connectedDevice: Device | null = null;
   private isScanning: boolean = false;
   private dataCallback: BLEDataCallback | null = null;
+  private binaryDataCallback: BLEBinaryCallback | null = null;
+  private rawBinaryCaptureActive = false;
   private errorCallback: BLEErrorCallback | null = null;
   private connectionCallback: BLEConnectionCallback | null = null;
   private currentProtocol: BLEProtocol = NORDIC_UART_PROTOCOL;
@@ -474,6 +505,7 @@ class BLEService {
           this.notificationSubscriptions = [];
 
           this.connectedDevice = null;
+          this.stopRawBinaryCapture();
           this.rxLineBuffer = '';
           this.isIntentionalDisconnect = false;
 
@@ -541,9 +573,17 @@ class BLEService {
           }
           if (!characteristic?.value) return;
 
-          // DUMB APPEND: Just add decoded text to buffer, no normalization here
-          const decodedText = base64.decode(characteristic.value);
+          // Raw-memory sync uses framed binary RB packets. While capture is active,
+          // NEVER run those bytes through UTF-8/text decoding because arbitrary binary
+          // values would be corrupted before the raw-sync service can validate CRC32.
+          if (this.rawBinaryCaptureActive && this.binaryDataCallback) {
+            const bytes = base64ToBytes(characteristic.value);
+            if (bytes.length > 0) this.binaryDataCallback(bytes);
+            return;
+          }
 
+          // Normal live/status path remains text + newline reassembly.
+          const decodedText = base64.decode(characteristic.value);
           this.rxLineBuffer += decodedText;
 
           // Last-resort safety: if buffer gets too large, trim from end
@@ -698,6 +738,30 @@ class BLEService {
   }
 
   /**
+   * Route notifications from the wristband log characteristic as exact bytes.
+   * This is used only by the raw NAND transfer. Live text parsing is restored
+   * immediately when stopRawBinaryCapture() is called.
+   */
+  startRawBinaryCapture(callback: BLEBinaryCallback): void {
+    this.rxLineBuffer = '';
+    this.binaryDataCallback = callback;
+    this.rawBinaryCaptureActive = true;
+    console.log('[BLE] ✓ Raw binary capture enabled');
+  }
+
+  stopRawBinaryCapture(): void {
+    if (!this.rawBinaryCaptureActive && !this.binaryDataCallback) return;
+    this.rawBinaryCaptureActive = false;
+    this.binaryDataCallback = null;
+    this.rxLineBuffer = '';
+    console.log('[BLE] ✓ Raw binary capture disabled; text parsing restored');
+  }
+
+  isRawBinaryCaptureActive(): boolean {
+    return this.rawBinaryCaptureActive;
+  }
+
+  /**
    * Send a command directly to the SMARTWATCH Zephyr log-service command
    * characteristic. This is intentionally independent of currentProtocol so
    * memory sync still works if the watch was discovered through NUS while the
@@ -820,7 +884,8 @@ class BLEService {
     // at the native GATT level automatically — just null the JS references.
     this.notificationSubscriptions = [];
 
-    // STEP 4: Stop data processor
+    // STEP 4: Stop data processors / binary transfer routing
+    this.stopRawBinaryCapture();
     this.stopBatchProcessor();
 
     // Capture device ID then null device BEFORE any await
@@ -922,6 +987,7 @@ class BLEService {
 
   // Cleanup
   destroy(): void {
+    this.stopRawBinaryCapture();
     this.stopScan();
     this.cleanupSubscriptions();
     this.disconnect();

@@ -247,8 +247,8 @@ export interface StimulationEvent {
 // ============================================================================
 
 export interface MinuteSummaryReading {
-  /** Reconstructed wall-clock timestamp for the original firmware minute. */
-  timestamp: Timestamp;
+  /** Exact firmware wall-clock timestamp when available. Legacy rows may omit it. */
+  timestamp?: Timestamp;
   /** Firmware uptime stored in the original V0_MIN record. */
   firmwareUptimeMs: number;
   /** Persistent NAND history index used for resume/deduplication. */
@@ -285,7 +285,58 @@ export interface MinuteSummaryReading {
 
   /** App-side metadata for traceability. */
   syncedAt?: Timestamp;
-  timestampSource?: 'DEVICE_UPTIME_ANCHOR';
+  timestampSource?: 'FIRMWARE_UNIX_MS' | 'UNAVAILABLE_LEGACY' | 'DEVICE_UPTIME_ANCHOR';
+}
+
+
+// ============================================================================
+// RAW NAND RECORDING CLOUD METADATA
+// ============================================================================
+
+export type RawRecordingUploadStatus =
+  | 'LOCAL_ONLY'
+  | 'UPLOADING'
+  | 'PAUSED'
+  | 'COMPLETE'
+  | 'ERROR'
+  | 'CANCELED';
+
+export interface RawRecordingMetadata {
+  recordingId: string;
+  source: 'WRISTBAND_RAW_NAND';
+  schemaVersion: number;
+
+  fileName: string;
+  storagePath: string;
+  byteSize: number;
+  uploadedBytes: number;
+  uploadStatus: RawRecordingUploadStatus;
+
+  deviceId?: string;
+  deviceName?: string;
+
+  exportProtocolVersion?: number;
+  rawRecordFormatVersion?: number;
+  pageSize?: number;
+  committedSpanBytes?: number;
+  pendingPageBytes?: number;
+  writtenRawPages?: number;
+  capacityBytes?: number;
+  storageFullAtDownload?: boolean;
+
+  timeValid?: boolean;
+  anchorUnixMs?: number;
+  anchorUptimeMs?: number;
+
+  storageGeneration?: string;
+  storageMd5Hash?: string;
+  storageContentType?: string;
+
+  errorMessage?: string | null;
+
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  uploadedAt?: Timestamp;
 }
 
 // ============================================================================

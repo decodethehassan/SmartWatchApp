@@ -200,6 +200,25 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
           setStatusMessage('Disconnected');
         }
       });
+
+      // Anchor wristband uptime to real wall-clock time immediately after every
+      // watch connection. This is best-effort and does not block the UI. The
+      // firmware persists the resulting absolute time alongside future V0
+      // minute-history records, so timestamps remain correct across reboots.
+      if (connected && device) {
+        const unixMs = Date.now();
+        void bleService.sendLogServiceCommand(`TIME_SYNC,${unixMs}\n`, true)
+          .then((ok) => {
+            if (ok) {
+              console.log('[BLEContext] ✓ Wristband TIME_SYNC sent:', unixMs);
+            } else {
+              console.warn('[BLEContext] Wristband TIME_SYNC was not accepted');
+            }
+          })
+          .catch((error) => {
+            console.warn('[BLEContext] Wristband TIME_SYNC failed:', error);
+          });
+      }
     });
 
     bleService.setErrorCallback((error: string) => {
