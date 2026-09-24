@@ -1,8 +1,8 @@
-# AudioStim Pro — Android App
+# AudioStim Pro — Smart Wristband Mobile Application
 
-AudioStim Pro is the Android companion application for the Smart Stim / MH4384 wristband system. It connects to the wristband over BLE, displays live physiological and sensor data, stores processed results in Firebase, supports raw NAND-memory synchronization to `.bin`, and provides researcher/developer views for detailed sensor inspection.
+AudioStim Pro is the complete mobile application project for the Smart Stim / MH4384 wristband system. It connects to the wearable over Bluetooth Low Energy (BLE), displays live physiological and sensor data, synchronizes processed Algorithm V0 results, supports raw NAND-memory synchronization to `.bin`, integrates Firebase authentication and cloud services, and provides both normal-user and researcher/developer workflows.
 
-This README documents the **app side only**. Firmware source is intentionally not included in this repository documentation.
+This repository contains the complete **application-side project**. The wristband firmware is maintained separately so the mobile application and firmware can evolve and be versioned independently.
 
 ---
 
@@ -28,10 +28,35 @@ The app currently supports:
 - EAS cloud APK builds
 - Sleep-duration presentation based on stored Algorithm V0 minute results
 - App branding with the AudioStim brain-wave icon
+- Main, Physio, Stimulation, Mental, Settings, and Developer/Sensor workflows
+- Daily / weekly / monthly history architecture direction using real synchronized data
+- Separation between user-facing physiological views and researcher/developer raw sensor views
 
 ---
 
-## 2. Main Technology Stack
+## 2. System Overview
+
+The Smart Wristband contains an nRF-based BLE SoC on the PCB. Sensor and processed data are transferred from the wearable to the AudioStim Pro mobile application over BLE. The application presents live and historical data and connects to Firebase services for authentication, structured application data, and planned raw-data cloud storage.
+
+![AudioStim Pro System Flow](./images/flow.png)
+
+### Current Application Views
+
+#### Main Dashboard
+
+![AudioStim Pro Main Dashboard](./images/main.png)
+
+#### Physiological Insight
+
+![AudioStim Pro Physiological Insight](./images/physio.png)
+
+#### Sensor / Developer Mode
+
+![AudioStim Pro Sensor Developer Mode](./images/dev_mode.png)
+
+---
+
+## 3. Main Technology Stack
 
 - React Native
 - Expo SDK 54
@@ -50,7 +75,7 @@ Important project versions are defined in `package.json`.
 
 ---
 
-## 3. Project Structure
+## 4. Project Structure
 
 ```text
 AudioStimApp/
@@ -60,6 +85,11 @@ AudioStimApp/
 │   ├── favicon.png
 │   ├── icon.png
 │   └── splash-icon.png
+├── images/
+│   ├── dev_mode.png
+│   ├── flow.png
+│   ├── main.png
+│   └── physio.png
 ├── src/
 │   ├── auth/
 │   │   ├── AuthContext.tsx
@@ -93,7 +123,7 @@ AudioStimApp/
 
 ---
 
-## 4. Authentication
+## 5. Authentication
 
 The app currently supports:
 
@@ -123,7 +153,7 @@ The Firebase Android app and Google OAuth configuration must remain aligned with
 
 ---
 
-## 5. Login UI and Branding
+## 6. Login UI and Branding
 
 The current login page uses:
 
@@ -158,7 +188,7 @@ The page includes:
 
 ---
 
-## 6. Main Navigation
+## 7. Main Navigation
 
 Main bottom-tab navigation:
 
@@ -188,7 +218,7 @@ The Sensor tab is intentionally treated as a detailed research/developer view.
 
 ---
 
-## 7. Home Screen
+## 8. Home Screen
 
 Main file:
 
@@ -215,7 +245,7 @@ Historical trends should be presented through a proper dedicated daily / weekly 
 
 ---
 
-## 8. Physio Screen
+## 9. Physio Screen
 
 Main file:
 
@@ -261,7 +291,7 @@ Detailed accelerometer and gyroscope signals belong in the Sensor / Developer vi
 
 ---
 
-## 9. Sleep
+## 10. Sleep
 
 Algorithm V0 already provides sleep information in its processed 60-second output.
 
@@ -317,7 +347,7 @@ These stages must not be fabricated until the algorithm provides real stage clas
 
 ---
 
-## 10. Sensor / Developer View
+## 11. Sensor / Developer View
 
 Main file:
 
@@ -344,7 +374,7 @@ The PPG + accepted-peaks visualization belongs in Sensor rather than Physio.
 
 ---
 
-## 11. BLE
+## 12. BLE
 
 BLE functionality is located mainly under:
 
@@ -373,7 +403,7 @@ The current validated firmware / Algorithm V0 behavior should not be changed fro
 
 ---
 
-## 12. Recording Sessions
+## 13. Recording Sessions
 
 A recording session is different from wristband memory.
 
@@ -387,7 +417,7 @@ These should not be treated as the same dataset.
 
 ---
 
-## 13. Wristband Memory
+## 14. Wristband Memory
 
 Memory controls are available from Settings.
 
@@ -410,7 +440,7 @@ The raw data file is a NAND snapshot and may include data from multiple periods,
 
 ---
 
-## 14. Raw `.bin` Data
+## 15. Raw `.bin` Data
 
 Raw `.bin` files can contain:
 
@@ -448,7 +478,7 @@ Researchers should still be able to export the original file.
 
 ---
 
-## 15. Raw Data Size
+## 16. Raw Data Size
 
 Based on real captured data, current raw recording is approximately:
 
@@ -470,7 +500,7 @@ Actual usage may be lower because raw sensor storage is wear-gated.
 
 ---
 
-## 16. Cloud Architecture
+## 17. Cloud Architecture
 
 Current Firebase project:
 
@@ -524,7 +554,7 @@ Large binary files should not be stored directly in Firestore.
 
 ---
 
-## 17. Recommended Cloud Path
+## 18. Recommended Cloud Path
 
 Recommended raw-file structure:
 
@@ -557,7 +587,7 @@ Authenticated user-specific Storage rules should be used.
 
 ---
 
-## 18. History View
+## 19. History View
 
 The app should provide a proper historical-data experience.
 
@@ -588,7 +618,7 @@ The app should present a simple history interface while the technical storage ar
 
 ---
 
-## 19. Firebase Configuration
+## 20. Firebase Configuration
 
 Important files:
 
@@ -605,7 +635,7 @@ Firebase web/API configuration values used by client SDKs are normally part of t
 
 ---
 
-## 20. Local Development Setup
+## 21. Local Development Setup
 
 Recommended environment:
 
@@ -637,7 +667,7 @@ on this project without reviewing dependency impact.
 
 ---
 
-## 21. TypeScript Check
+## 22. TypeScript Check
 
 Before every build:
 
@@ -649,7 +679,7 @@ No output means the TypeScript check passed.
 
 ---
 
-## 22. Expo
+## 23. Expo
 
 The project is currently based on Expo SDK 54.
 
@@ -669,7 +699,7 @@ npx expo --version
 
 ---
 
-## 23. EAS
+## 24. EAS
 
 Existing EAS project:
 
@@ -709,7 +739,7 @@ Expected project:
 
 ---
 
-## 24. Android APK Build
+## 25. Android APK Build
 
 The `preview` profile in `eas.json` builds an APK.
 
@@ -727,7 +757,7 @@ Do not create a new EAS project or new signing identity unless intentionally mig
 
 ---
 
-## 25. Android Configuration
+## 26. Android Configuration
 
 Current Android application package:
 
@@ -753,7 +783,7 @@ expo-font
 
 ---
 
-## 26. App Icons
+## 27. App Icons
 
 Current branding assets:
 
@@ -786,7 +816,7 @@ audiostim-brain-logo.png
 
 ---
 
-## 27. Git Workflow
+## 28. Git Workflow
 
 Current main working branch:
 
@@ -832,7 +862,7 @@ nothing to commit, working tree clean
 
 ---
 
-## 28. Important Development Rules
+## 29. Important Development Rules
 
 When modifying the app:
 
@@ -850,7 +880,7 @@ When modifying the app:
 
 ---
 
-## 29. Storage-Full Product Direction
+## 30. Storage-Full Product Direction
 
 Desired safe workflow:
 
@@ -868,7 +898,7 @@ Never automatically erase wristband memory.
 
 ---
 
-## 30. Normal User vs Researcher Experience
+## 31. Normal User vs Researcher Experience
 
 ### Normal User
 
@@ -901,7 +931,7 @@ Advanced users can access:
 
 ---
 
-## 31. Current Known Limitations / Future Work
+## 32. Current Known Limitations / Future Work
 
 Planned or incomplete items include:
 
@@ -918,7 +948,7 @@ Planned or incomplete items include:
 
 ---
 
-## 32. Build Checklist
+## 33. Build Checklist
 
 Before generating a client APK:
 
@@ -945,11 +975,11 @@ Before generating a client APK:
 
 ---
 
-## 33. Repository Scope
+## 34. Repository Scope
 
-This repository should contain the **application-side code and configuration only**.
+This repository is the **complete AudioStim Pro mobile application project**, including application source code, navigation, authentication, BLE integration, Firebase configuration, memory-sync workflows, UI assets, branding, and project documentation.
 
-Firmware should be maintained in its own dedicated repository/project rather than embedded inside this app repository.
+The wristband firmware is intentionally maintained in its own dedicated repository/project rather than embedded inside the mobile app repository.
 
 That keeps:
 
@@ -963,8 +993,7 @@ cleanly separated.
 
 ---
 
-## 34. Notes
 
-This README is intended to replace the older scattered project notes and architecture markdown files.
-
-For future changes, update this single `README.md` so the repository has one current source of app-side setup and architecture documentation.
+<p align="center">
+  <strong>Developed for MHTechFusion</strong>
+</p>
