@@ -14,6 +14,7 @@ import { LineChart } from 'react-native-chart-kit';
 import { useDevMode, SensorKey } from '../../functionality/DevModeContext';
 import { useSharedSensorPipeline } from '../../hooks/SensorPipelineContext';
 import { useBLE } from '../../functionality/BLEContext';
+import PPGWaveformCard from '../../components/PPGWaveformCard';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const CHART_WIDTH = SCREEN_WIDTH - 64;
@@ -68,6 +69,12 @@ const displaySeries = (values: number[], fallback: number[] = [0, 0]) => {
   if (values.length === 1) return [values[0], values[0]];
   return fallback;
 };
+
+const fixedRangeDataset = (min: number, max: number) => ({
+  data: [min, max],
+  color: () => 'rgba(0,0,0,0)',
+  strokeWidth: 0,
+});
 
 const liveLabels = (count: number) =>
   Array.from({ length: Math.max(count, 2) }, (_, index) =>
@@ -334,10 +341,10 @@ export default function SensorTabScreen() {
   }, [history.gyroX, history.gyroY, history.gyroZ]);
 
   const tempChartData = useMemo(() => {
-    const values = displaySeries(history.temperature);
+    const values = displaySeries(history.temperature, [33, 33]);
     return {
       labels: liveLabels(values.length),
-      datasets: [{ data: values }],
+      datasets: [{ data: values }, fixedRangeDataset(33, 44)],
     };
   }, [history.temperature]);
 
@@ -394,6 +401,32 @@ export default function SensorTabScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {anyPpgEnabled && (
+          <View style={{ paddingHorizontal: 16, marginBottom: 14 }}>
+            <PPGWaveformCard
+              cleanSamples={live.ppgStream.filt}
+              timestamps={live.ppgStream.timestamps}
+              peakFlags={live.ppgStream.peaks}
+              qualityFlags={live.ppgStream.qualityFlags}
+              artifactFlags={live.ppgStream.artifactFlags}
+              contactFlags={live.ppgStream.contactFlags}
+              hrBpm={live.heartRate.bpm}
+              confidence={live.heartRate.confidence}
+              sqi={live.ppgQuality.sqi}
+              artifact={live.ppgQuality.artifact}
+              qualityOk={live.ppgQuality.qualityOk}
+              wearDetected={live.ppgQuality.wearDetected}
+              ibi_ms={live.heartRate.ibi_ms}
+              fsHz={live.ppgStream.fsHz}
+              acdc={live.ppgStream.acdc}
+              hrQuality={live.ppgStream.hrQuality}
+              rmssdMs={live.ppgStream.rmssdMs}
+              prvReady={live.ppgStream.prvReady}
+              ibiCv={live.ppgStream.ibiCv}
+            />
+          </View>
+        )}
+
         {anyPpgEnabled && (
           <MetricCard
             accent="#10b981"
@@ -470,10 +503,9 @@ export default function SensorTabScreen() {
             title="Skin Temperature"
             subtitle={
               hasFresh(live.temperature.lastUpdated)
-                ? `${live.temperature.tempC.toFixed(1)}°C (Live)`
+                ? `${live.temperature.tempC.toFixed(1)}°C`
                 : 'Waiting for temperature data'
             }
-            description="Live skin-temperature trend from the wristband."
           >
             <PhysioChart
               data={tempChartData}

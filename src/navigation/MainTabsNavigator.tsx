@@ -1,6 +1,6 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useDevMode } from '../functionality/DevModeContext';
 
@@ -21,6 +21,7 @@ export type MainTabsParamList = {
 };
 
 const Tab = createBottomTabNavigator<MainTabsParamList>();
+const TAB_ICON_SIZE = 24;
 
 export default function MainTabsNavigator() {
   const insets = useSafeAreaInsets();
@@ -34,43 +35,100 @@ export default function MainTabsNavigator() {
         freezeOnBlur: true,
         tabBarActiveTintColor: '#1B4965',
         tabBarInactiveTintColor: '#94a3b8',
+        tabBarHideOnKeyboard: true,
         tabBarStyle: {
           backgroundColor: '#ffffff',
           borderTopColor: '#e5e7eb',
           borderTopWidth: 1,
+          paddingTop: 5,
           paddingBottom: Math.max(insets.bottom, 6),
-          paddingTop: 4,
-          height: 56 + Math.max(insets.bottom, 6),
+          height: 58 + Math.max(insets.bottom, 6),
+        },
+        tabBarItemStyle: {
+          paddingHorizontal: 0,
         },
         tabBarLabelStyle: {
-          fontSize: 11,
-          fontWeight: '500',
+          fontSize: isDevMode ? 9 : 10,
+          fontWeight: '600',
+          marginTop: 1,
         },
-        tabBarIcon: ({ focused, color, size }) => {
-          let iconName: keyof typeof Ionicons.glyphMap = 'home';
-
+        tabBarIcon: ({ focused, color }) => {
           if (route.name === 'Home') {
-            iconName = focused ? 'home' : 'home-outline';
-          } else if (route.name === 'Physiological') {
-            iconName = focused ? 'heart' : 'heart-outline';
-          } else if (route.name === 'Stimulation') {
-            iconName = focused ? 'musical-notes' : 'musical-notes-outline';
-          } else if (route.name === 'Psychological') {
-            iconName = focused ? 'headset' : 'headset-outline';
-          } else if (route.name === 'Sensor') {
-            iconName = focused ? 'analytics' : 'analytics-outline';
-          } else if (route.name === 'Settings') {
-            iconName = focused ? 'settings' : 'settings-outline';
+            return (
+              <Ionicons
+                name={focused ? 'home' : 'home-outline'}
+                size={TAB_ICON_SIZE}
+                color={color}
+              />
+            );
           }
 
-          return <Ionicons name={iconName} size={size} color={color} />;
+          if (route.name === 'Physiological') {
+            return (
+              <Ionicons
+                name={focused ? 'heart' : 'heart-outline'}
+                size={TAB_ICON_SIZE}
+                color={color}
+              />
+            );
+          }
+
+          if (route.name === 'Stimulation') {
+            return (
+              <MaterialCommunityIcons
+                name="brain"
+                size={TAB_ICON_SIZE + 1}
+                color={color}
+              />
+            );
+          }
+
+          if (route.name === 'Psychological') {
+            return (
+              <MaterialCommunityIcons
+                name="head-heart-outline"
+                size={TAB_ICON_SIZE + 1}
+                color={color}
+              />
+            );
+          }
+
+          if (route.name === 'Sensor') {
+            return (
+              <Ionicons
+                name={focused ? 'hardware-chip' : 'hardware-chip-outline'}
+                size={TAB_ICON_SIZE}
+                color={color}
+              />
+            );
+          }
+
+          return (
+            <Ionicons
+              name={focused ? 'settings' : 'settings-outline'}
+              size={TAB_ICON_SIZE}
+              color={color}
+            />
+          );
         },
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
-      <Tab.Screen name="Physiological" component={PhysiologicalInsightScreen} options={{ title: 'Physical' }} />
-      <Tab.Screen name="Stimulation" component={StimulationScreen} options={{ title: 'Stimulation' }} />
-      <Tab.Screen name="Psychological" component={PsychologicalStack} options={{ title: 'Mental' }} />
+      <Tab.Screen
+        name="Physiological"
+        component={PhysiologicalInsightScreen}
+        options={{ title: 'Physio' }}
+      />
+      <Tab.Screen
+        name="Stimulation"
+        component={StimulationScreen}
+        options={{ title: 'Stimulation' }}
+      />
+      <Tab.Screen
+        name="Psychological"
+        component={PsychologicalStack}
+        options={{ title: 'Mental' }}
+      />
       {isDevMode && (
         <Tab.Screen name="Sensor" component={SensorTabScreen} options={{ title: 'Sensor' }} />
       )}

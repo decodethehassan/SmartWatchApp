@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
   ScrollView,
   TouchableOpacity,
   StyleSheet,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -14,16 +13,13 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useBLE } from '../../functionality/BLEContext';
 import { useAuth } from '../../auth/AuthContext';
 import { useSharedSensorPipeline } from '../../hooks/SensorPipelineContext';
-import { getRecentSessions, SessionSummary } from '../../firebase/dataLogger';
 import { BluetoothScanModal } from '../../components/BluetoothScanModal';
 
 export default function HomeScreen() {
-  const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
   const [scanModalVisible, setScanModalVisible] = useState(false);
 
   const {
-    isAnyDeviceConnected, activeDeviceName, connectedDeviceName,
+    isAnyDeviceConnected,
     isConnected, isEarbudConnected,
     disconnectAll,
     disconnectDevice,
@@ -33,10 +29,6 @@ export default function HomeScreen() {
   const { user, logout } = useAuth();
   const { live, session, startSession, stopSession } = useSharedSensorPipeline();
 
-  const safe = (value: number | null | undefined, fallback = 0) => {
-    if (value === null || value === undefined) return fallback;
-    return Number.isFinite(value) ? value : fallback;
-  };
 
   const hasFresh = (updatedAt: Date | null) => {
     if (!updatedAt) return false;
@@ -45,16 +37,6 @@ export default function HomeScreen() {
     return Date.now() - ts < 15_000;
   };
 
-  const loadSessions = useCallback(() => {
-    if (!user) { setSessionsLoading(false); return; }
-    setSessionsLoading(true);
-    getRecentSessions(user.uid, 5)
-      .then((s) => setRecentSessions(s))
-      .catch((err) => console.error('[HomeScreen] sessions load error:', err))
-      .finally(() => setSessionsLoading(false));
-  }, [user]);
-
-  useEffect(() => { loadSessions(); }, [loadSessions]);
 
   useEffect(() => {
     if (isConnected && !session.isRecording && user) {
@@ -62,9 +44,6 @@ export default function HomeScreen() {
     }
   }, [isConnected]);
 
-  useEffect(() => {
-    if (!session.isRecording && !isConnected) loadSessions();
-  }, [session.isRecording, isConnected, loadSessions]);
 
   const handleLogout = () => {
     Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
@@ -90,12 +69,8 @@ export default function HomeScreen() {
     ]);
   };
 
-  const handleStopSession = async () => { await stopSession(); loadSessions(); };
+  const handleStopSession = async () => { await stopSession(); };
 
-  const safeFormat = (val: number | null | undefined, decimals: number = 1): string => {
-    if (val === null || val === undefined || !Number.isFinite(val)) return '--';
-    return val.toFixed(decimals);
-  };
 
   // Patient-friendly metric cards
   const getHealthMetricCards = () => {
@@ -393,46 +368,7 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Recent Sessions */}
-        <View style={[styles.section, { paddingBottom: 32 }]}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Recent Sessions</Text>
-            <TouchableOpacity onPress={loadSessions}>
-              <Ionicons name="refresh-outline" size={20} color="#1B4965" />
-            </TouchableOpacity>
-          </View>
-          {sessionsLoading ? (
-            <ActivityIndicator color="#1B4965" style={{ marginTop: 16 }} />
-          ) : recentSessions.length === 0 ? (
-            <View style={styles.emptySessionState}>
-              <Ionicons name="time-outline" size={40} color="#e2e8f0" />
-              <Text style={styles.emptySessionText}>No sessions yet</Text>
-              <Text style={styles.emptySessionSub}>Connect your wristband and start recording</Text>
-            </View>
-          ) : (
-            recentSessions.map((s) => (
-              <View key={s.sessionId} style={styles.sessionCard}>
-                <View style={styles.sessionIconWrap}>
-                  <Ionicons name={s.isComplete ? 'checkmark-circle' : 'ellipse-outline'} size={24}
-                    color={s.isComplete ? '#10b981' : '#f59e0b'} />
-                </View>
-                <View style={styles.sessionInfo}>
-                  <Text style={styles.sessionName}>{s.sessionName}</Text>
-                  <Text style={styles.sessionDate}>
-                    {s.startTime ? s.startTime.toLocaleDateString() : 'Unknown'}
-                    {s.deviceName ? ` · ${s.deviceName}` : ''}
-                  </Text>
-                </View>
-                <View style={styles.sessionRight}>
-                  <Text style={styles.sessionPts}>{s.dataPointCount} pts</Text>
-                  <Text style={[styles.sessionStatus, { color: s.isComplete ? '#10b981' : '#f59e0b' }]}>
-                    {s.isComplete ? 'Done' : 'Partial'}
-                  </Text>
-                </View>
-              </View>
-            ))
-          )}
-        </View>
+        <View style={{ height: 32 }} />
 
       </ScrollView>
     </SafeAreaView>
@@ -520,17 +456,6 @@ const styles = StyleSheet.create({
   sensorLabel: { fontSize: 12, color: '#64748b', fontWeight: '600', textAlign: 'center' },
   connectPromptBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e8f4f8', borderRadius: 12, padding: 14, marginTop: 12 },
   connectPromptText: { flex: 1, fontSize: 14, color: '#1B4965', fontWeight: '500' },
-  emptySessionState: { alignItems: 'center', paddingVertical: 32, gap: 8 },
-  emptySessionText: { fontSize: 16, fontWeight: '600', color: '#94a3b8' },
-  emptySessionSub: { fontSize: 13, color: '#cbd5e1', textAlign: 'center' },
-  sessionCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', padding: 14, borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: '#e2e8f0', shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 3, elevation: 1 },
-  sessionIconWrap: { marginRight: 12 },
-  sessionInfo: { flex: 1 },
-  sessionName: { fontSize: 14, fontWeight: '600', color: '#1e293b', marginBottom: 2 },
-  sessionDate: { fontSize: 12, color: '#64748b' },
-  sessionRight: { alignItems: 'flex-end', gap: 3 },
-  sessionPts: { fontSize: 14, fontWeight: '700', color: '#1e293b' },
-  sessionStatus: { fontSize: 12, fontWeight: '600', color: '#f59e0b' },
   devicesList: {
     gap: 10,
   },
