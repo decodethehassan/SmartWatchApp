@@ -44,15 +44,21 @@ The Smart Wristband contains an nRF-based BLE SoC on the PCB. Sensor and process
 
 #### Main Dashboard
 
-![AudioStim Pro Main Dashboard](./images/main.png)
+<p align="center">
+  <img src="./images/main.png" alt="AudioStim Pro Main Dashboard" width="280" />
+</p>
 
 #### Physiological Insight
 
-![AudioStim Pro Physiological Insight](./images/physio.png)
+<p align="center">
+  <img src="./images/physio.png" alt="AudioStim Pro Physiological Insight" width="280" />
+</p>
 
 #### Sensor / Developer Mode
 
-![AudioStim Pro Sensor Developer Mode](./images/dev_mode.png)
+<p align="center">
+  <img src="./images/dev_mode.png" alt="AudioStim Pro Sensor Developer Mode" width="280" />
+</p>
 
 ---
 
