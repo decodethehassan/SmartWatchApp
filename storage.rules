@@ -1,0 +1,21 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Only the authenticated owner can access their original raw archive.
+    // No globally-readable download URLs are created by these rules.
+    match /raw-data/{userId}/{deviceId}/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 536870912
+        && request.resource.contentType == 'application/octet-stream';
+      // Erasing raw cloud backups must remain an explicit, separate action.
+      allow delete: if false;
+    }
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

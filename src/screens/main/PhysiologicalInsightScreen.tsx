@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, ScrollView, StyleSheet, Dimensions, Platform } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, Dimensions, Platform, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LineChart } from 'react-native-chart-kit';
@@ -10,6 +10,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { getMinuteSummariesForRange } from '../../firebase/dataLogger';
 import { memorySyncService } from '../../functionality/MemorySyncService';
 import type { MinuteSummaryReading } from '../../firebase/sensorTypes';
+import PhysioHistoryView from './PhysioHistoryView';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const CHART_WIDTH = SCREEN_WIDTH - 64;
@@ -192,6 +193,7 @@ function MetricCard({
 
 export default function PhysiologicalInsightScreen() {
   const [history, setHistory] = useState<LiveHistory>(EMPTY_HISTORY);
+  const [activeView, setActiveView] = useState<'live' | 'history'>('live');
   const [sleepDurationMinutes, setSleepDurationMinutes] = useState<number | null>(null);
   const [sleepHistoryLoading, setSleepHistoryLoading] = useState(true);
   const [sleepHistoryUnavailable, setSleepHistoryUnavailable] = useState(false);
@@ -345,6 +347,18 @@ export default function PhysiologicalInsightScreen() {
           </Text>
         </View>
 
+        <View style={{ marginHorizontal: 16, marginBottom: 14, flexDirection: 'row', borderRadius: 11, backgroundColor: '#e8eff5', padding: 4 }}>
+          {(['live', 'history'] as const).map(view => (
+            <TouchableOpacity key={view} accessibilityRole="button" onPress={() => setActiveView(view)}
+              style={{ flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 9, backgroundColor: activeView === view ? COLORS.primary : 'transparent' }}>
+              <Text style={{ fontSize: 14, fontWeight: '800', color: activeView === view ? '#fff' : COLORS.primary }}>
+                {view === 'live' ? 'Live' : 'History'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {activeView === 'history' ? <PhysioHistoryView userId={user?.uid} /> : <>
         <MetricCard
           accent={COLORS.error}
           icon="heart"
@@ -453,6 +467,7 @@ export default function PhysiologicalInsightScreen() {
           </View>
         </MetricCard>
 
+        </>}
         <View style={{ height: 40 }} />
       </ScrollView>
     </SafeAreaView>

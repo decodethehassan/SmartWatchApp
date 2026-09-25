@@ -236,7 +236,7 @@ export default function WristbandDataMemoryScreen({ navigation }: Props) {
           ) : null}
 
           <Text style={styles.footnote}>
-            Sync Raw Data downloads the complete binary NAND snapshot. The BIN is kept locally on the phone and can be shared/saved for analysis. Cloud Storage upload is disabled in this free-plan build.
+            Sync Raw Data downloads the complete binary NAND snapshot. The BIN is kept locally on the phone and can be shared/saved for analysis. Secure cloud backup is being integrated; local Share / Save BIN remains available.
           </Text>
         </View>
 
