@@ -3,6 +3,8 @@ import { ActivityIndicator, Dimensions, StyleSheet, Text, TouchableOpacity, View
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle, Line, Path, Text as SvgText } from 'react-native-svg';
 import { getMinuteSummariesForRange } from '../../firebase/dataLogger';
+import { getCanonicalMinuteSummariesForRange } from '../../firebase/binHistoryService';
+import { rawCloudBackupService } from '../../firebase/rawStorageService';
 import { memorySyncService } from '../../functionality/MemorySyncService';
 import {
   buildMetricTrend, displayDuration, getActivitySummary, getObservedSleep,
@@ -107,6 +109,13 @@ export default function PhysioHistoryView({ userId }: { userId?: string }) {
     });
   }, []);
 
+  useEffect(() => {
+    let previousPhase = rawCloudBackupService.getState().phase;
+    return rawCloudBackupService.subscribe(state => {
+      if (state.phase === 'complete' && previousPhase !== 'complete') setRefreshVersion(v => v + 1);
+      previousPhase = state.phase;
+    });
+  }, []);
   const refresh = useCallback(() => setRefreshVersion(v => v + 1), []);
   useEffect(() => {
     let cancelled = false;
@@ -119,8 +128,15 @@ export default function PhysioHistoryView({ userId }: { userId?: string }) {
     setError('');
     // Bring in up to twelve hours before the selected period to recognize sleep
     // crossing midnight, but never assign missing minutes to that episode.
-    void getMinuteSummariesForRange(userId, new Date(+start - dayMs / 2), new Date(+end - 1))
-      .then(results => { if (!cancelled) setRows(results); })
+    const rangeStart = new Date(+start - dayMs / 2);
+    const rangeEnd = new Date(+end - 1);
+    // Stage 1 memory records + canonical BIN imports; presentation deduplicates
+    // overlapping timestamped device records before making any graph.
+    void Promise.all([
+      getMinuteSummariesForRange(userId, rangeStart, rangeEnd),
+      getCanonicalMinuteSummariesForRange(userId, rangeStart, rangeEnd),
+    ])
+      .then(([memoryRows, binRows]) => { if (!cancelled) setRows([...memoryRows, ...binRows]); })
       .catch(() => { if (!cancelled) { setRows([]); setError('Could not load synced history. Check your connection and try again.'); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -159,12 +175,15 @@ export default function PhysioHistoryView({ userId }: { userId?: string }) {
           <Ionicons name="refresh" size={19} color={NAVY}/>
         </TouchableOpacity>
       </View>
-      <Text style={styles.source}>From real, timestamped Algorithm V0 minute results · {availableMinuteCount} available minute(s)</Text>
+      <Text style={styles.source}>From real, timestamped Algorithm V0 minute results (memory + BIN import) · {availableMinuteCount} available minute(s)</Text>
       {!userId ? <Text style={styles.warning}>Sign in to see your saved history.</Text> : null}
       {loading ? <ActivityIndicator style={{ marginVertical: 28 }} size="large" color={NAVY}/> : null}
       {error ? <Text style={styles.warning}>{error}</Text> : null}
       {!loading && !error && userId && availableMinuteCount === 0 ? (
-        <Text style={styles.warning}>No timestamped results for this period. Connect your wristband and use Settings → Wristband Data & Memory → Sync Memory.</Text>
+        <Text style={styles.warning}>
+          No data available for this period.{"\n"}
+          Connect your wristband, then open Settings, Wristband Data &amp; Memory, and tap Sync Memory.
+        </Text>
       ) : null}
       {!loading && userId && !error ? <>
         {metrics.map(metric => {

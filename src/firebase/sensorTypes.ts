@@ -257,7 +257,7 @@ export interface MinuteSummaryReading {
   syncSession?: number;
   /** Protocol version from D,INFO. */
   memoryProtocolVersion?: number;
-  source: 'WRISTBAND_MEMORY';
+  source: 'WRISTBAND_MEMORY' | 'RAW_BIN';
   deviceId?: string;
   deviceName?: string;
 
@@ -333,6 +333,18 @@ export interface RawRecordingMetadata {
   storageContentType?: string;
 
   errorMessage?: string | null;
+
+  /** Strong content identity; immutable backups, never filename-based matching. */
+  sha256?: string;
+  supersedesIds?: string[];
+  supersededBy?: string;
+  timestampedProcessedCount?: number;
+  undatedProcessedCount?: number;
+  firstProcessedUnixMs?: number;
+  lastProcessedUnixMs?: number;
+  historyImportedCount?: number;
+  historyImportComplete?: boolean;
+  historyErrorMessage?: string | null;
 
   createdAt?: Timestamp;
   updatedAt?: Timestamp;

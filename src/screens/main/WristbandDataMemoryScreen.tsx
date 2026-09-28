@@ -10,6 +10,7 @@ import { useBLE } from '../../functionality/BLEContext';
 import { memorySyncService, type MemorySyncState } from '../../functionality/MemorySyncService';
 import { rawMemorySyncService, type RawMemorySyncState } from '../../functionality/RawMemorySyncService';
 import { getAllMinuteSummaries } from '../../firebase/dataLogger';
+import { rawCloudBackupService, type CloudBackupState, type RawLocalCandidate } from '../../firebase/rawStorageService';
 import type { SettingsStackParamList } from '../../navigation/SettingsStack';
 
 const COLORS = {
@@ -41,9 +42,22 @@ export default function WristbandDataMemoryScreen({ navigation }: Props) {
   const [memorySync, setMemorySync] = useState<MemorySyncState>(memorySyncService.getState());
   const [rawMemorySync, setRawMemorySync] = useState<RawMemorySyncState>(rawMemorySyncService.getState());
   const [storedResultCount, setStoredResultCount] = useState(0);
+  const [cloud, setCloud] = useState<CloudBackupState>(rawCloudBackupService.getState());
+  const [previousBackup, setPreviousBackup] = useState<RawLocalCandidate | null>(null);
 
   useEffect(() => memorySyncService.subscribe(setMemorySync), []);
   useEffect(() => rawMemorySyncService.subscribe(setRawMemorySync), []);
+  useEffect(() => rawCloudBackupService.subscribe(setCloud), []);
+  useEffect(() => {
+    let active = true;
+    if(user?.uid) {
+      void rawCloudBackupService.lastLocal(user.uid)
+        .then(result => { if(active) setPreviousBackup(result); })
+        .catch(error => console.warn('[Cloud] Could not load last phone backup:',error));
+    } else setPreviousBackup(null);
+    return () => {active=false;};
+  }, [user?.uid]);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +77,25 @@ export default function WristbandDataMemoryScreen({ navigation }: Props) {
 
   const memoryBusy = ['checking', 'syncing', 'saving', 'stopping'].includes(memorySync.phase);
   const rawBusy = ['checking', 'syncing', 'stopping'].includes(rawMemorySync.phase);
+  const cloudBusy = ['indexing','importing','uploading','verifying'].includes(cloud.phase);
+  useEffect(() => {
+    if(rawMemorySync.phase !== 'complete' || !rawMemorySync.fileUri || !rawMemorySync.fileName || !user?.uid) return;
+    const deviceId = connectedDevice?.id || (previousBackup?.fileUri === rawMemorySync.fileUri ? previousBackup.deviceId : undefined);
+    if(!deviceId) return;
+    // Re-opening this screen must not cause an unnecessary duplicate upload.
+    if(cloudBusy || (cloud.fileUri === rawMemorySync.fileUri &&
+      cloud.totalBytes === rawMemorySync.totalBytes && ['complete','error'].includes(cloud.phase))) return;
+    const candidate = { uid:user.uid,deviceId,deviceName:connectedDeviceName || undefined,
+      fileUri:rawMemorySync.fileUri,fileName:rawMemorySync.fileName };
+    setPreviousBackup(candidate);
+    // The raw sync service starts cloud backup even if this screen unmounts.
+    // This local state only makes Retry available in this Settings screen.
+  }, [rawMemorySync.phase,rawMemorySync.fileUri,rawMemorySync.totalBytes,user?.uid,connectedDevice?.id,previousBackup?.fileUri,previousBackup?.deviceId]);
+  const retryCloud = async () => {
+    const candidate = previousBackup;
+    if(candidate && user?.uid===candidate.uid) await rawCloudBackupService.backup(candidate);
+  };
+
 
   useEffect(() => {
     if (!isConnected && memoryBusy) void memorySyncService.handleDisconnected();
@@ -205,8 +238,8 @@ export default function WristbandDataMemoryScreen({ navigation }: Props) {
 
           <View style={styles.actionRow}>
             <TouchableOpacity
-              style={[styles.rawButton, (!isConnected || rawBusy || memoryBusy) && styles.disabledButton]}
-              disabled={!isConnected || rawBusy || memoryBusy}
+              style={[styles.rawButton, (!isConnected || rawBusy || memoryBusy || cloudBusy) && styles.disabledButton]}
+              disabled={!isConnected || rawBusy || memoryBusy || cloudBusy}
               onPress={() => { void handleRawSync(); }}
             >
               <Ionicons name="download-outline" size={16} color="#fff" />
@@ -235,8 +268,45 @@ export default function WristbandDataMemoryScreen({ navigation }: Props) {
             </TouchableOpacity>
           ) : null}
 
+          <View style={styles.cloudStatus}>
+            <View style={{flexDirection:'row',alignItems:'center',gap:8}}>
+              <Ionicons name={cloud.phase==='complete'?'cloud-done-outline':'cloud-upload-outline'}
+                size={19} color={cloud.phase==='complete'?COLORS.success:COLORS.primary}/>
+              <Text style={{fontWeight:'800',fontSize:13,color:COLORS.text,flex:1}}>Private Cloud Backup</Text>
+            </View>
+            <Text style={[styles.metaText,{marginTop:7}]}>
+              {cloud.message || 'Ready to back up after downloading from wristband.'}
+            </Text>
+            {cloudBusy ? <View style={styles.progressTrack}>
+              <View style={[styles.cloudProgressFill,{width:`${Math.min(100,Math.round(cloud.progress*100))}%`}]}/>
+            </View> : null}
+            {cloud.phase==='complete' ? (
+              <Text style={{marginTop:7,color:COLORS.success,fontSize:11}}>
+                Verified cloud archive · {cloud.indexedMinuteCount-cloud.undatedMinuteCount} dated minute(s) ·
+                {' '}{cloud.overlapCount} overlapping earlier backup(s) identified.
+              </Text>
+            ) : null}
+            {cloud.error ? <Text style={styles.errorText}>{cloud.error}</Text> : null}
+            {cloud.phase==='error' && previousBackup && (
+              <TouchableOpacity style={styles.smallButton} onPress={() => {void retryCloud();}}>
+                <Text style={styles.smallButtonText}>Retry Cloud Backup</Text>
+              </TouchableOpacity>
+            )}
+            {cloudBusy && (
+              <TouchableOpacity style={styles.smallButton} onPress={() => rawCloudBackupService.cancelAfterChunk()}>
+                <Text style={styles.smallButtonText}>Pause after current chunk</Text>
+              </TouchableOpacity>
+            )}
+            {!cloudBusy && cloud.phase==='idle' && previousBackup && (
+              <TouchableOpacity style={styles.smallButton} onPress={() => {void retryCloud();}}>
+                <Text style={styles.smallButtonText}>Back Up Last Local BIN</Text>
+              </TouchableOpacity>
+            )}
+            {!user && <Text style={styles.metaText}>Sign in to use private cloud backup.</Text>}
+          </View>
+
           <Text style={styles.footnote}>
-            Sync Raw Data downloads the complete binary NAND snapshot. The BIN is kept locally on the phone and can be shared/saved for analysis. Secure cloud backup is being integrated; local Share / Save BIN remains available.
+            Sync Raw Data downloads the complete binary NAND snapshot. The BIN is kept locally on the phone and can be shared/saved for analysis. Completed downloads are automatically indexed and backed up to private Firebase Storage when signed in and online. The original local BIN and Share / Save remain available; earlier overlapping cloud backups are not erased automatically.
           </Text>
         </View>
 

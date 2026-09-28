@@ -3,6 +3,7 @@ import { DeviceEventEmitter } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 
 import { bleService } from './BLEService';
+import { rawCloudBackupService } from '../firebase/rawStorageService';
 
 const BLE_DATA_EVENT = 'BLE_DATA_LINE';
 const RAW_META_PREFIX = 'wristband_raw_sync_v1';
@@ -684,6 +685,20 @@ class RawMemorySyncService {
           message: `Raw sync complete — ${formatBytes(totalBytes)} saved locally`,
           error: null,
         });
+        // Trigger from the service, not from a screen. Cloud backup continues
+        // if the user navigates away from Settings after a successful raw sync.
+        // Never block the already-verified local BIN or alter the BLE protocol.
+        if (this.file && this.context?.userId && this.context.deviceId) {
+          const candidate = {
+            uid: this.context.userId,
+            deviceId: this.context.deviceId,
+            deviceName: this.context.deviceName,
+            fileUri: this.file.uri,
+            fileName: this.file.name,
+          };
+          void rawCloudBackupService.backup(candidate);
+        }
+
       } else {
         this.queueResumeMetaWrite(this.diskOffset, totalBytes);
         await this.metaWriteChain.catch((): void => {});
@@ -760,6 +775,8 @@ class RawMemorySyncService {
         downloaded_at_unix_ms: Date.now(),
         complete,
         local_file_name: this.file.name,
+        device_id: this.context?.deviceId || null,
+        device_name: this.context?.deviceName || null,
       }, null, 2));
     } catch (error) {
       console.warn('[RawMemorySync] Could not write metadata sidecar:', error);

@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import type { Auth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Replaced with project-provided Firebase configuration
@@ -53,6 +54,7 @@ export const auth: Auth = (() => {
 })();
 
 export const db = getFirestore(app);
+export const storage = getStorage(app, "gs://audiostimulator-mhtech.firebasestorage.app");
 
 // Export the initialized Firebase app in case other modules need it
 export { app };

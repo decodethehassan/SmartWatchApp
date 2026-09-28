@@ -51,24 +51,42 @@ const qualityScore = (row: HistoricalReading): number => {
 };
 
 /**
- * De-duplicate minute results from repeated memory syncs and future BIN import.
- * A device + exact Unix timestamp identifies a chart minute; NEVER file name or
- * time of sync. A raw file's overlapping records cannot double-count here.
+ * Graph-level overlap suppression across processed memory syncs and BIN imports.
+ * Canonical BIN records have exact per-device/UTC IDs in Firestore. Historical
+ * memory-sync and BIN timestamps may differ slightly when independently
+ * reconstructed from TIME_SYNC. Merge ONLY results from the SAME identified
+ * device no more than 1.5 seconds apart, choosing the highest quality row.
+ * Do not quantize times to calendar minute boundaries or fill missing minutes.
  */
 export const uniqueExactMinutes = (rows: HistoricalReading[]): HistoricalReading[] => {
-  const chosen = new Map<string, HistoricalReading>();
-  for (const row of rows) {
-    const ms = exactMs(row);
-    if (!Number.isFinite(ms)) continue;
-    const id = `${row.deviceId || 'unknown'}:${ms}`;
-    const previous = chosen.get(id);
-    if (!previous || qualityScore(row) > qualityScore(previous) ||
-      (qualityScore(row) === qualityScore(previous) &&
-        (row.syncedAt?.toMillis?.() || 0) > (previous.syncedAt?.toMillis?.() || 0))) {
-      chosen.set(id, row);
-    }
+  const perDevice = new Map<string,HistoricalReading[]>();
+  for(const row of rows){
+    const ms=exactMs(row);
+    if(!Number.isFinite(ms))continue;
+    const key=row.deviceId||'unknown';
+    const group=perDevice.get(key)||[];
+    group.push(row);
+    perDevice.set(key,group);
   }
-  return [...chosen.values()].sort((a, b) => exactMs(a) - exactMs(b));
+  const chosen:HistoricalReading[]=[];
+  const better=(a:HistoricalReading,b:HistoricalReading):HistoricalReading => {
+    const qa=qualityScore(a),qb=qualityScore(b);
+    if(qa!==qb)return qa>qb?a:b;
+    return (a.syncedAt?.toMillis?.()||0)>=(b.syncedAt?.toMillis?.()||0)?a:b;
+  };
+  for(const group of perDevice.values()){
+    group.sort((a,b)=>exactMs(a)-exactMs(b));
+    let best:HistoricalReading|null=null,firstMs=NaN;
+    for(const row of group){
+      const ms=exactMs(row);
+      if(!best||ms-firstMs>1500){
+        if(best)chosen.push(best);
+        best=row;firstMs=ms;
+      }else best=better(best,row);
+    }
+    if(best)chosen.push(best);
+  }
+  return chosen.sort((a,b)=>exactMs(a)-exactMs(b));
 };
 
 export const validMetricValue = (row: HistoricalReading, metric: MetricName): number | null => {
